@@ -17,7 +17,7 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter_animate/flutter_animate.dart';
-import 'package:aquasense/screens/home/components/home_header.dart';
+// Note: HomeHeader is now defined within this file
 import 'package:aquasense/screens/home/components/quick_action_card.dart';
 import 'package:aquasense/screens/home/components/water_usage_card.dart';
 import 'package:aquasense/utils/auth_service.dart';
@@ -37,38 +37,151 @@ class _HomeScreenState extends State<HomeScreen> {
   late Stream<UserData?> _userDataStream;
   Future<ConsumptionCategory?>? _predictionFuture; // To hold the prediction result
 
+  // --- State for Announcement Indicator ---
+  bool _hasNewAnnouncements = false;
+  Stream<QuerySnapshot>? _newAnnouncementsStream;
+  Timestamp? _lastReadTimestamp;
+  UserData? _citizenData; // Store citizen data
+  Stream<UserData?>? _userDataListener; // Listener for user data changes
+
+
   @override
   void initState() {
     super.initState();
-    _userDataStream = fetchUserDataStream();
+    // Start listening for user data changes immediately
+    _setupUserDataListener();
+    // Use the listener stream as the primary source for the FutureBuilder
+    _userDataStream = _userDataListener ?? Stream.value(null);
+    // Trigger an initial fetch as well for faster first load
+    _fetchInitialCitizenData();
   }
 
-  Stream<UserData?> fetchUserDataStream() {
-    if (currentUser != null) {
-      return FirebaseFirestore.instance
-          .collection('users')
-          .doc(currentUser!.uid)
-          .snapshots()
-          .map((doc) {
-        if (doc.exists) {
-          final userData = UserData.fromFirestore(doc);
-          // Trigger the prediction when user data is fetched
-          if (userData.hasActiveConnection && _predictionFuture == null) {
-            _predictionFuture = _mlService.predictConsumptionCategory(
-              wardId: userData.wardId,
-              userId: userData.uid,
-            );
-          }
-          return userData;
+  // Fetch initial data for faster loading
+  Future<void> _fetchInitialCitizenData() async {
+    if (currentUser == null) return;
+    try {
+      final doc = await FirebaseFirestore.instance.collection('users').doc(currentUser!.uid).get();
+      if (doc.exists && mounted) {
+        final initialData = UserData.fromFirestore(doc);
+        // Only update if _citizenData is still null (listener might be faster)
+        if (_citizenData == null) {
+          _citizenData = initialData;
+          _lastReadTimestamp = initialData.lastReadAnnouncementsTimestamp;
+          _setupNewAnnouncementsStream(); // Setup stream with initial data
+          _triggerPredictionIfNeeded(initialData); // Trigger prediction
+          setState(() {}); // Update UI if needed
         }
-        return null;
-      }).handleError((error) {
-        debugPrint("Error fetching user data stream: $error");
-        return null;
-      });
+      }
+    } catch (e) {
+      debugPrint("Error fetching initial citizen data: $e");
     }
-    return Stream.value(null);
   }
+
+
+  // Listen for real-time updates to user data (like lastRead timestamp)
+  void _setupUserDataListener() {
+    if (currentUser == null) return;
+    _userDataListener = FirebaseFirestore.instance
+        .collection('users')
+        .doc(currentUser!.uid)
+        .snapshots()
+        .map((doc) => doc.exists ? UserData.fromFirestore(doc) : null)
+        .handleError((error) {
+      debugPrint("Error listening to user data: $error");
+      return null;
+    });
+
+    _userDataListener?.listen((userData) {
+      if (userData != null && mounted) {
+        bool needsRebuild = false;
+        // Check if citizen data actually changed (to avoid unnecessary rebuilds)
+        if (_citizenData == null || _citizenData!.uid != userData.uid || _citizenData!.name != userData.name /* add other relevant fields */) {
+          _citizenData = userData;
+          needsRebuild = true;
+        }
+
+        // Update last read timestamp and re-setup stream if it changed
+        if (_lastReadTimestamp != userData.lastReadAnnouncementsTimestamp) {
+          _lastReadTimestamp = userData.lastReadAnnouncementsTimestamp;
+          _setupNewAnnouncementsStream(); // Re-setup stream with new timestamp
+          // No need for needsRebuild = true here, stream listener will update indicator
+        }
+
+        // Trigger prediction if needed (e.g., connection status changed)
+        _triggerPredictionIfNeeded(userData);
+
+        if (needsRebuild) {
+          setState(() {}); // Trigger rebuild if core user data changed
+        }
+      } else if (mounted) {
+        // Handle case where user doc might be deleted while listening
+        _citizenData = null;
+        setState(() {}); // Trigger rebuild to show error/logout state
+      }
+    });
+  }
+
+
+  // Setup the stream to listen for new announcements
+  void _setupNewAnnouncementsStream() {
+    if (_citizenData == null) return;
+
+    final query = FirebaseFirestore.instance
+        .collection('announcements')
+        .where('wardId', whereIn: [null, _citizenData!.wardId]) // Global or own ward
+        .orderBy('createdAt', descending: true);
+
+    Stream<QuerySnapshot> effectiveStream;
+    // If there's a last read timestamp, only query newer ones
+    if (_lastReadTimestamp != null) {
+      effectiveStream = query.where('createdAt', isGreaterThan: _lastReadTimestamp!).snapshots();
+    } else {
+      effectiveStream = query.limit(1).snapshots(); // Check if at least one exists if never read
+    }
+
+    // Assign and listen
+    _newAnnouncementsStream = effectiveStream;
+    _newAnnouncementsStream?.listen((snapshot) {
+      if (mounted) {
+        final bool hasNew = snapshot.docs.isNotEmpty;
+        if (_hasNewAnnouncements != hasNew){ // Only update state if value changes
+          setState(() {
+            _hasNewAnnouncements = hasNew;
+          });
+        }
+      }
+    }, onError: (error){
+      debugPrint("Error listening to announcements stream: $error");
+      if(mounted && _hasNewAnnouncements) { // Only update state if value changes
+        setState(() {
+          _hasNewAnnouncements = false; // Assume no new ones on error
+        });
+      }
+    });
+  }
+
+  // Helper to trigger prediction
+  void _triggerPredictionIfNeeded(UserData userData) {
+    if (userData.hasActiveConnection && _predictionFuture == null) {
+      // Use mounted check before async operation and setState
+      if(mounted){
+        _predictionFuture = _mlService.predictConsumptionCategory(
+          wardId: userData.wardId,
+          userId: userData.uid,
+        );
+        // Optional: Trigger rebuild if prediction card relies on this future state
+        // setState((){});
+      }
+    } else if (!userData.hasActiveConnection && _predictionFuture != null) {
+      // Reset future if connection becomes inactive
+      if(mounted){
+        setState(() {
+          _predictionFuture = null;
+        });
+      }
+    }
+  }
+
 
   Stream<ConnectionRequest?> getConnectionRequestStream() {
     if (currentUser == null) {
@@ -113,9 +226,11 @@ class _HomeScreenState extends State<HomeScreen> {
     UserData? supervisor;
 
     try {
+      // Correct query: Look in 'users' collection with role 'supervisor' and matching wardId
       final supervisorQuery = await FirebaseFirestore.instance
-          .collection('supervisors')
+          .collection('users')
           .where('wardId', isEqualTo: wardId)
+          .where('role', isEqualTo: 'supervisor') // Added role filter
           .limit(1)
           .get();
 
@@ -123,6 +238,7 @@ class _HomeScreenState extends State<HomeScreen> {
         supervisor = UserData.fromFirestore(supervisorQuery.docs.first);
       }
     } catch (e) {
+      if (!mounted) return;
       scaffoldMessenger.showSnackBar(SnackBar(content: Text("Error finding supervisor: $e")));
       return;
     }
@@ -177,31 +293,41 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: StreamBuilder<UserData?>(
-        stream: _userDataStream,
+        stream: _userDataStream, // Use the listener stream
         builder: (context, userSnapshot) {
-          if (userSnapshot.connectionState == ConnectionState.waiting) {
+          // Show loading if listener hasn't provided data yet
+          if (userSnapshot.connectionState == ConnectionState.waiting && _citizenData == null) {
             return const Center(child: CircularProgressIndicator());
           }
 
+          // Handle error or logout state if stream provides null or has error
           if (userSnapshot.hasError || !userSnapshot.hasData || userSnapshot.data == null) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  const Text('Could not load user data.', style: TextStyle(color: Colors.white)),
-                  ElevatedButton(
-                      onPressed: () => _authService.logoutUser(),
-                      child: const Text("Logout"))
-                ],
-              ),
-            );
+            // If _citizenData is also null, show proper error/logout
+            if(_citizenData == null){
+              return Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Text('Could not load user data.', style: TextStyle(color: Colors.redAccent)),
+                    const SizedBox(height: 10),
+                    ElevatedButton(
+                        onPressed: () => _authService.logoutUser(),
+                        child: const Text("Logout"))
+                  ],
+                ),
+              );
+            }
+            // If listener fails but we have stale data, continue with stale data
+            // This prevents flickering if there's a temporary network issue
           }
 
-          final userData = userSnapshot.data!;
+          // Use the latest available citizen data (_citizenData is updated by listener)
+          final userData = _citizenData!;
 
           return Container(
             decoration: const BoxDecoration(
@@ -213,14 +339,20 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             child: CustomScrollView(
               slivers: [
+                // --- Pass indicator status to HomeHeader ---
                 HomeHeader(
                   userName: userData.name,
+                  hasNewAnnouncements: _hasNewAnnouncements, // Pass the flag
                   onNotificationTap: () {
                     Navigator.of(context).push(
-                      SlideFadeRoute(page: const AnnouncementsScreen()),
-                    );
+                        MaterialPageRoute(builder: (_) => AnnouncementsScreen(userData: userData)) // Pass user data
+                    ).then((_) {
+                      // No explicit refresh needed, listener handles timestamp update
+                      debugPrint("Returned from announcements screen.");
+                    });
                   },
                 ),
+                // --- End Header Update ---
 
                 if (userData.hasActiveConnection)
                   _buildWaterTankDisplay(userData.wardId)
@@ -253,7 +385,6 @@ class _HomeScreenState extends State<HomeScreen> {
                             }
                         );
                       }
-
                       return const SliverToBoxAdapter(child: SizedBox.shrink());
                     }
                 ),
@@ -263,12 +394,14 @@ class _HomeScreenState extends State<HomeScreen> {
                   FutureBuilder<ConsumptionCategory?>(
                     future: _predictionFuture,
                     builder: (context, predictionSnapshot) {
-                      if (predictionSnapshot.connectionState == ConnectionState.done &&
-                          predictionSnapshot.hasData &&
-                          predictionSnapshot.data != null) {
+                      if (predictionSnapshot.connectionState == ConnectionState.waiting) {
+                        // Optional: Show a shimmer or placeholder while predicting
+                        return const SliverToBoxAdapter(child: SizedBox(height: 100)); // Example placeholder height
+                      }
+                      if (predictionSnapshot.hasData && predictionSnapshot.data != null) {
                         return PredictionCard(category: predictionSnapshot.data!);
                       }
-                      // You can return a loading indicator or an empty box while waiting
+                      // Don't show anything if no prediction or error
                       return const SliverToBoxAdapter(child: SizedBox.shrink());
                     },
                   ),
@@ -312,13 +445,13 @@ class _HomeScreenState extends State<HomeScreen> {
               return const SizedBox(height: 190, child: Center(child: CircularProgressIndicator()));
             }
             if (!snapshot.hasData || !snapshot.data!.exists) {
-              return const SizedBox.shrink();
+              return const SizedBox.shrink(); // Hide if no tank data
             }
 
             final tank = WaterTank.fromFirestore(snapshot.data!);
 
             return SizedBox(
-              height: 190,
+              height: 190, // Ensure fixed height for layout
               child: AnimatedWaterTank(
                 waterLevel: tank.level,
                 tankName: tank.tankName,
@@ -346,10 +479,13 @@ class _HomeScreenState extends State<HomeScreen> {
             children: [
               Icon(Icons.info_outline, color: Colors.tealAccent, size: 30),
               SizedBox(width: 16),
-              Text(
-                'Apply for a connection to start.',
-                style: TextStyle(
-                    color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+              Expanded( // Allow text to wrap
+                child: Text(
+                  'Apply for a connection to access billing & usage features.',
+                  textAlign: TextAlign.center, // Center align text
+                  style: TextStyle(
+                      color: Colors.white, fontSize: 16, fontWeight: FontWeight.bold),
+                ),
               )
             ],
           ),
@@ -378,8 +514,8 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
 
             QuickActionCard(
-              title: 'Report a\nLeak',
-              icon: Icons.water_drop_outlined,
+              title: 'Report an\nIssue', // Updated text slightly
+              icon: Icons.report_problem_outlined, // Changed Icon
               color: Colors.blueAccent,
               onTap: () {
                 Navigator.of(context)
@@ -419,6 +555,80 @@ class _HomeScreenState extends State<HomeScreen> {
               .fadeIn(duration: 500.ms)
               .slideY(begin: 0.5, curve: Curves.easeOut),
         ),
+      ),
+    );
+  }
+}
+
+// --- UPDATED HomeHeader Class ---
+class HomeHeader extends StatelessWidget {
+  final String userName;
+  final VoidCallback onNotificationTap;
+  final bool hasNewAnnouncements; // Add this
+
+  const HomeHeader({
+    super.key,
+    required this.userName,
+    required this.onNotificationTap,
+    required this.hasNewAnnouncements, // Require it
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SliverPadding(
+      padding: const EdgeInsets.only(left: 24, right: 24, top: 40, bottom: 10),
+      sliver: SliverToBoxAdapter(
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            Expanded(
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.white.withAlpha(20),
+                  borderRadius: BorderRadius.circular(30),
+                ),
+                child: Text(
+                  userName,
+                  style: const TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                  textAlign: TextAlign.center,
+                ),
+              ),
+            ),
+            const SizedBox(width: 16),
+            // --- Icon with Indicator ---
+            IconButton(
+              icon: Stack(
+                clipBehavior: Clip.none,
+                children: [
+                  const Icon(Icons.campaign_outlined, color: Colors.white, size: 30), // Changed icon
+                  if (hasNewAnnouncements)
+                    Positioned(
+                      top: -4,
+                      right: -4,
+                      child: Container(
+                        width: 10, // Size of the dot
+                        height: 10,
+                        decoration: const BoxDecoration(
+                          color: Colors.redAccent,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+              tooltip: 'View Announcements',
+              onPressed: onNotificationTap,
+            ),
+            // --- End Icon Update ---
+          ],
+        ).animate().fadeIn(duration: 500.ms).slideX(begin: -0.2, curve: Curves.easeOut),
       ),
     );
   }

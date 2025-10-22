@@ -11,6 +11,7 @@ class UserData {
   final Timestamp createdAt;
   final bool hasActiveConnection;
   final String? profileImageUrl;
+  final Timestamp? lastReadAnnouncementsTimestamp; // <-- ADDED FIELD
 
   UserData({
     required this.uid,
@@ -22,11 +23,12 @@ class UserData {
     this.isPhoneVerified = false,
     required this.createdAt,
     this.hasActiveConnection = false,
-    this.profileImageUrl, // ✅ ADDED TO CONSTRUCTOR
+    this.profileImageUrl,
+    this.lastReadAnnouncementsTimestamp, // <-- ADDED TO CONSTRUCTOR
   });
 
   factory UserData.fromFirestore(DocumentSnapshot doc) {
-    Map<String, dynamic> data = doc.data() as Map<String, dynamic>;
+    Map<String, dynamic> data = doc.data() as Map<String, dynamic>? ?? {}; // Null safety check
     return UserData(
       uid: doc.id,
       name: data['name'] ?? '',
@@ -37,7 +39,38 @@ class UserData {
       isPhoneVerified: data['isPhoneVerified'] ?? false,
       createdAt: data['createdAt'] ?? Timestamp.now(),
       hasActiveConnection: data['hasActiveConnection'] ?? false,
-      profileImageUrl: data['profileImageUrl'], // ✅ READ FROM FIRESTORE
+      profileImageUrl: data['profileImageUrl'],
+      lastReadAnnouncementsTimestamp: data['lastReadAnnouncementsTimestamp'], // <-- READ FROM FIRESTORE
     );
   }
+
+  // Optional: Add copyWith method for easier updates if needed elsewhere
+  UserData copyWith({
+    String? uid,
+    String? name,
+    String? email,
+    String? role,
+    String? wardId,
+    String? phoneNumber,
+    bool? isPhoneVerified,
+    Timestamp? createdAt,
+    bool? hasActiveConnection,
+    String? profileImageUrl,
+    Timestamp? lastReadAnnouncementsTimestamp,
+  }) {
+    return UserData(
+      uid: uid ?? this.uid,
+      name: name ?? this.name,
+      email: email ?? this.email,
+      role: role ?? this.role,
+      wardId: wardId ?? this.wardId,
+      phoneNumber: phoneNumber ?? this.phoneNumber,
+      isPhoneVerified: isPhoneVerified ?? this.isPhoneVerified,
+      createdAt: createdAt ?? this.createdAt,
+      hasActiveConnection: hasActiveConnection ?? this.hasActiveConnection,
+      profileImageUrl: profileImageUrl ?? this.profileImageUrl,
+      lastReadAnnouncementsTimestamp: lastReadAnnouncementsTimestamp ?? this.lastReadAnnouncementsTimestamp,
+    );
+  }
+
 }

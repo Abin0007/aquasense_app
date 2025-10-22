@@ -98,17 +98,23 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
                 // Use the filtered list of roles
                 children: availableRoles
                     .map((String role) => RadioListTile<String>(
+                  // *** UPDATED: RadioListTile Usage ***
                   title: Text(role.toUpperCase(), style: const TextStyle(color: Colors.white)),
                   value: role,
                   groupValue: roleToUpdate,
                   onChanged: (String? value) {
-                    setDialogState(() { // Use setDialogState here
+                    setDialogState(() {
                       roleToUpdate = value;
                     });
                   },
                   activeColor: Colors.cyanAccent,
-                  fillColor: MaterialStateProperty.all(Colors.cyanAccent),
+                  // *** UPDATED: Use resolveWith for fillColor ***
+                  fillColor: MaterialStateColor.resolveWith((states) =>
+                  states.contains(MaterialState.selected)
+                      ? Colors.cyanAccent
+                      : Colors.white54), // Provide color for unselected state too
                   controlAffinity: ListTileControlAffinity.trailing,
+                  // *****************************************
                 ))
                     .toList(),
               ),
@@ -167,14 +173,13 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
                     DropdownSearch<String>(
                       popupProps: PopupProps.menu(
                           showSearchBox: true,
-                          // *** CORRECTED: Removed textStyle from MenuProps ***
-                          menuProps: MenuProps(backgroundColor: const Color(0xFF2C5364)),
+                          menuProps: const MenuProps(backgroundColor: Color(0xFF2C5364)), // Corrected
                           searchFieldProps: TextFieldProps(
                               style: const TextStyle(color: Colors.black), // Style for search input text
                               decoration: InputDecoration(
                                 hintText: "Search State",
                                 filled: true,
-                                fillColor: Colors.white.withOpacity(0.8),
+                                fillColor: Colors.white.withAlpha(204), // 80% Opacity
                                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
                               )
                           ),
@@ -210,14 +215,13 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
                       DropdownSearch<String>(
                         popupProps: PopupProps.menu(
                             showSearchBox: true,
-                            // *** CORRECTED: Removed textStyle from MenuProps ***
-                            menuProps: MenuProps(backgroundColor: const Color(0xFF2C5364)),
+                            menuProps: const MenuProps(backgroundColor: Color(0xFF2C5364)), // Corrected
                             searchFieldProps: TextFieldProps(
                                 style: const TextStyle(color: Colors.black), // Style for search input text
                                 decoration: InputDecoration(
                                   hintText: "Search District",
                                   filled: true,
-                                  fillColor: Colors.white.withOpacity(0.8),
+                                  fillColor: Colors.white.withAlpha(204), // 80% Opacity
                                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
                                 )
                             ),
@@ -250,14 +254,13 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
                       DropdownSearch<String>(
                         popupProps: PopupProps.menu(
                             showSearchBox: true,
-                            // *** CORRECTED: Removed textStyle from MenuProps ***
-                            menuProps: MenuProps(backgroundColor: const Color(0xFF2C5364)),
+                            menuProps: const MenuProps(backgroundColor: Color(0xFF2C5364)), // Corrected
                             searchFieldProps: TextFieldProps(
                                 style: const TextStyle(color: Colors.black), // Style for search input text
                                 decoration: InputDecoration(
                                   hintText: "Search Ward",
                                   filled: true,
-                                  fillColor: Colors.white.withOpacity(0.8),
+                                  fillColor: Colors.white.withAlpha(204), // 80% Opacity
                                   border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
                                 )
                             ),
@@ -296,7 +299,7 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
                   style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.cyanAccent,
                       foregroundColor: Colors.black,
-                      disabledBackgroundColor: Colors.grey.withOpacity(0.5) // Style for disabled state
+                      disabledBackgroundColor: Colors.grey.withAlpha(128) // 50% Opacity
                   ),
                   child: const Text('Assign Ward'),
                 ),
@@ -450,7 +453,7 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
                     padding: const EdgeInsets.all(12),
                     margin: const EdgeInsets.only(bottom: 20),
                     decoration: BoxDecoration(
-                        color: Colors.orangeAccent.withOpacity(0.15),
+                        color: Colors.orangeAccent.withAlpha(38), // 15% Opacity
                         borderRadius: BorderRadius.circular(10),
                         border: Border.all(color: Colors.orangeAccent)
                     ),
@@ -520,7 +523,7 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
       children: [
         CircleAvatar(
           radius: 50,
-          backgroundColor: Colors.white.withAlpha(30),
+          backgroundColor: Colors.white.withAlpha(30), // 12% Opacity approx
           backgroundImage: backgroundImage,
           // Handle potential errors loading network image
           onBackgroundImageError: (_, __) {
@@ -594,7 +597,7 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
     required VoidCallback onTap,
   }) {
     return Card(
-      color: Colors.white.withAlpha(25),
+      color: Colors.white.withAlpha(25), // ~10% Opacity
       child: ListTile(
         leading: Icon(icon, color: Colors.cyanAccent),
         title: Text(title, style: const TextStyle(color: Colors.white70)),
@@ -614,7 +617,7 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
         hintStyle: const TextStyle(color: Colors.white70),
         prefixIcon: Icon(icon, color: Colors.white70),
         filled: true,
-        fillColor: Colors.black.withOpacity(0.3), // Darker background for contrast
+        fillColor: Colors.black.withAlpha(77), // 30% Opacity approx
         contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
         border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none),
         enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: const BorderSide(color: Colors.white30)),
