@@ -27,43 +27,72 @@ class _AnnouncementsScreenState extends State<AnnouncementsScreen> {
     final userId = FirebaseAuth.instance.currentUser?.uid;
     if (userId != null) {
       try {
-        // Find the latest announcement timestamp relevant to this user
-        // *** Fetch the most recent relevant announcement to set the timestamp ***
-        Query query = FirebaseFirestore.instance.collection('announcements');
-        // Apply the SAME filtering logic used in build() to find the latest *relevant* timestamp
-        if (widget.userData.role != 'admin' && widget.userData.wardId.isNotEmpty) {
-          // For non-admins, consider both global (null) and their specific ward
-          // We need to fetch the latest from either category they can see.
-          // Firestore doesn't easily support OR on the same field with null/value.
-          // Fetching latest global and latest ward separately might be needed for perfect accuracy,
-          // but for simplicity, we'll fetch the absolute latest and update the timestamp.
-          // This means the indicator might clear even if the latest wasn't for their ward,
-          // which is often acceptable UX.
-          // If strict per-ward accuracy is needed, more complex timestamp logic is required.
-        }
-        query = query.orderBy('createdAt', descending: true).limit(1);
-
-        final latestAnnouncementSnapshot = await query.get();
+        // --- FIX: Declare latestTimestamp here ---
         Timestamp? latestTimestamp;
+        // ----------------------------------------
 
-        if (latestAnnouncementSnapshot.docs.isNotEmpty) {
-          final data = latestAnnouncementSnapshot.docs.first.data() as Map<String, dynamic>?;
-          latestTimestamp = data?['createdAt'] as Timestamp?;
+        // Find the latest announcement timestamp relevant to this user
+        Query query = FirebaseFirestore.instance.collection('announcements');
+
+        // Apply filtering logic similar to build() to find the latest *relevant* timestamp
+        if (widget.userData.role != 'admin' && widget.userData.wardId.isNotEmpty) {
+          // Fetch the latest global and latest ward announcement separately and compare timestamps.
+          final globalQuery = FirebaseFirestore.instance.collection('announcements')
+              .where('wardId', isEqualTo: null)
+              .orderBy('createdAt', descending: true).limit(1);
+          final wardQuery = FirebaseFirestore.instance.collection('announcements')
+              .where('wardId', isEqualTo: widget.userData.wardId)
+              .orderBy('createdAt', descending: true).limit(1);
+
+          final results = await Future.wait([globalQuery.get(), wardQuery.get()]);
+          Timestamp? latestGlobalTs;
+          Timestamp? latestWardTs;
+
+          if (results[0].docs.isNotEmpty) {
+            latestGlobalTs = (results[0].docs.first.data() as Map<String, dynamic>?)?['createdAt'] as Timestamp?;
+          }
+          if (results[1].docs.isNotEmpty) {
+            latestWardTs = (results[1].docs.first.data() as Map<String, dynamic>?)?['createdAt'] as Timestamp?;
+          }
+
+          // Determine the most recent timestamp between global and ward-specific
+          if (latestGlobalTs != null && latestWardTs != null) {
+            latestTimestamp = latestGlobalTs.compareTo(latestWardTs) > 0 ? latestGlobalTs : latestWardTs;
+          } else {
+            latestTimestamp = latestGlobalTs ?? latestWardTs;
+          }
+
+        } else if (widget.userData.role != 'admin' && widget.userData.wardId.isEmpty) {
+          // User has no ward ID - only check global
+          query = query.where('wardId', isEqualTo: null).orderBy('createdAt', descending: true).limit(1);
+          final snapshot = await query.get();
+          if (snapshot.docs.isNotEmpty) {
+            final data = snapshot.docs.first.data() as Map<String, dynamic>?;
+            latestTimestamp = data?['createdAt'] as Timestamp?;
+          }
+        } else { // Admin
+          // Admin - check the absolute latest
+          query = query.orderBy('createdAt', descending: true).limit(1);
+          final snapshot = await query.get();
+          if (snapshot.docs.isNotEmpty) {
+            final data = snapshot.docs.first.data() as Map<String, dynamic>?;
+            latestTimestamp = data?['createdAt'] as Timestamp?;
+          }
         }
 
         // Only update if there was an announcement to read
         if (latestTimestamp != null) {
           await FirebaseFirestore.instance.collection('users').doc(userId).update({
             // Set timestamp slightly ahead to avoid race conditions with stream
-            'lastReadAnnouncementsTimestamp': Timestamp(latestTimestamp.seconds + 1, 0),
+            'lastReadAnnouncementsTimestamp': Timestamp(latestTimestamp!.seconds + 1, 0), // Use ! since it's checked
           });
-          debugPrint("Updated lastReadAnnouncementsTimestamp for user $userId to ${latestTimestamp.toDate().add(const Duration(seconds: 1))}");
+          debugPrint("Updated lastReadAnnouncementsTimestamp for user $userId to ${latestTimestamp!.toDate().add(const Duration(seconds: 1))}"); // Use !
         } else {
           // If no announcements ever, set it to now so indicator doesn't show for empty list
           // Check if timestamp already exists before overwriting
           final userDoc = await FirebaseFirestore.instance.collection('users').doc(userId).get();
-          final userData = userDoc.data();
-          if (userData != null && !userData.containsKey('lastReadAnnouncementsTimestamp')) {
+          final userDataMap = userDoc.data();
+          if (userDataMap != null && !userDataMap.containsKey('lastReadAnnouncementsTimestamp')) {
             await FirebaseFirestore.instance.collection('users').doc(userId).update({
               'lastReadAnnouncementsTimestamp': Timestamp.now(),
             });
@@ -81,29 +110,12 @@ class _AnnouncementsScreenState extends State<AnnouncementsScreen> {
 
   @override
   Widget build(BuildContext context) {
-    // --- *** CORRECTED QUERY LOGIC *** ---
+    // --- *** REVERTED QUERY LOGIC & ADDED CLIENT-SIDE FILTERING *** ---
     Query query = FirebaseFirestore.instance.collection('announcements');
 
-    // Admins see all announcements, ordered by date.
-    if (widget.userData.role == 'admin') {
-      query = query.orderBy('createdAt', descending: true);
-    }
-    // Citizens and Supervisors see global announcements (wardId == null)
-    // AND announcements specific to their wardId.
-    // Since Firestore doesn't easily support OR on the same field like this,
-    // we query for *either* null OR the specific ward ID using separate streams
-    // and merge them client-side or restructure the data.
-    // FOR NOW: Querying everything and filtering client-side (less efficient but works).
-    // A better long-term solution involves data restructuring or stream merging.
-    else if (widget.userData.wardId.isNotEmpty) {
-      // Fetch all, filter later
-      query = query.orderBy('createdAt', descending: true);
-    } else {
-      // User has no ward ID (should ideally not happen for citizen/supervisor after profile completion)
-      // Fetch only global announcements
-      query = query.where('wardId', isEqualTo: null).orderBy('createdAt', descending: true);
-    }
-    // --- *** END OF CORRECTION *** ---
+    // Fetch all announcements ordered by date. Filtering will happen client-side for non-admins.
+    query = query.orderBy('createdAt', descending: true);
+    // --- *** END OF REVERTED LOGIC *** ---
 
 
     return Scaffold(
@@ -128,7 +140,7 @@ class _AnnouncementsScreenState extends State<AnnouncementsScreen> {
             ),
             SliverToBoxAdapter(
               child: StreamBuilder<QuerySnapshot>(
-                stream: query.snapshots(), // Use the constructed query
+                stream: query.snapshots(), // Use the broader query
                 builder: (context, snapshot) {
                   if (snapshot.connectionState == ConnectionState.waiting) {
                     return const Center(
@@ -141,56 +153,58 @@ class _AnnouncementsScreenState extends State<AnnouncementsScreen> {
                   if (snapshot.hasError) {
                     return Center(child: Text('Something went wrong: ${snapshot.error}', style: const TextStyle(color: Colors.redAccent))); // Show error
                   }
-                  if (!snapshot.hasData || snapshot.data!.docs.isEmpty) {
-                    return const Center(
-                      child: Padding(
-                        padding: EdgeInsets.all(48.0),
-                        child: Text(
-                          'No relevant announcements at the moment.',
-                          style: TextStyle(color: Colors.white70, fontSize: 16),
-                        ),
-                      ),
-                    );
-                  }
+
+                  // Start with all fetched announcements
+                  List<QueryDocumentSnapshot> allAnnouncements = snapshot.data?.docs ?? [];
 
                   // --- Client-side filtering if not admin ---
-                  List<QueryDocumentSnapshot> announcements = snapshot.data!.docs;
+                  List<QueryDocumentSnapshot> relevantAnnouncements;
                   if (widget.userData.role != 'admin' && widget.userData.wardId.isNotEmpty) {
-                    announcements = announcements.where((doc) {
+                    relevantAnnouncements = allAnnouncements.where((doc) {
                       final data = doc.data() as Map<String, dynamic>? ?? {};
                       final wardId = data['wardId'] as String?;
+                      // Keep if wardId is null (global) OR matches user's ward
                       return wardId == null || wardId == widget.userData.wardId;
                     }).toList();
+                  } else if (widget.userData.role != 'admin') { // Non-admin, no wardId
+                    relevantAnnouncements = allAnnouncements.where((doc) {
+                      final data = doc.data() as Map<String, dynamic>? ?? {};
+                      final wardId = data['wardId'] as String?;
+                      // Keep only global
+                      return wardId == null;
+                    }).toList();
                   }
-                  if (announcements.isEmpty) {
-                    return const Center(
-                      child: Padding(
-                        padding: EdgeInsets.all(48.0),
-                        child: Text(
-                          'No relevant announcements at the moment.',
-                          style: TextStyle(color: Colors.white70, fontSize: 16),
-                        ),
-                      ),
-                    );
+                  else {
+                    // Admin sees all
+                    relevantAnnouncements = allAnnouncements;
                   }
                   // --- End client-side filtering ---
 
+                  if (relevantAnnouncements.isEmpty) {
+                    return const Center(
+                      child: Padding(
+                        padding: EdgeInsets.all(48.0),
+                        child: Text(
+                          'No relevant announcements at the moment.',
+                          style: TextStyle(color: Colors.white70, fontSize: 16),
+                        ),
+                      ),
+                    );
+                  }
+
 
                   return ListView.builder(
-                    itemCount: announcements.length,
+                    itemCount: relevantAnnouncements.length, // Use filtered list
                     shrinkWrap: true,
                     physics: const NeverScrollableScrollPhysics(),
                     padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
                     itemBuilder: (context, index) {
-                      final doc = announcements[index];
+                      final doc = relevantAnnouncements[index]; // Use filtered list
                       final data = doc.data() as Map<String, dynamic>? ?? {};
                       final createdBy = data['createdBy'] as String?;
                       // Determine if it's a supervisor post based on whether createdBy matches current user if they are a supervisor
-                      final bool isPostOwnerSupervisor = widget.userData.role == 'supervisor' && createdBy == widget.userData.uid;
-                      // Determine if the post itself was made by *any* supervisor (requires fetching creator's role - skipped for simplicity, assuming non-admin creator is supervisor)
-                      final bool isSupervisorPostGeneral = createdBy != null && !createdBy.contains('admin'); // Heuristic
-
-
+                      // A more robust check might involve fetching the creator's role if needed for display styling.
+                      final bool isSupervisorPostGeneral = createdBy != null && createdBy != 'admin_placeholder_uid'; // Simple heuristic
                       final bool canDelete = widget.userData.role == 'admin' || (widget.userData.role == 'supervisor' && createdBy == widget.userData.uid);
 
                       // --- Pass creator info and delete callback to card ---

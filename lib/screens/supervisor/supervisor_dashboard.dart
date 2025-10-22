@@ -1,3 +1,4 @@
+import 'dart:async'; // Import async
 import 'package:aquasense/models/user_data.dart';
 import 'package:aquasense/models/water_tank_model.dart';
 import 'package:aquasense/screens/announcements/announcements_screen.dart'; // Import general screen
@@ -30,10 +31,10 @@ class _SupervisorDashboardState extends State<SupervisorDashboard> {
 
   // --- State for Announcement Indicator ---
   bool _hasNewAnnouncements = false;
-  Stream<QuerySnapshot>? _newAnnouncementsStream;
+  StreamSubscription? _newAnnouncementsSubscription; // Renamed
   Timestamp? _lastReadTimestamp;
   UserData? _supervisorData; // Store supervisor data
-  Stream<UserData?>? _userDataListener; // Listener for user data changes
+  StreamSubscription? _userDataSubscription; // Renamed
   User? _currentUser; // Store current user
 
   @override
@@ -49,7 +50,7 @@ class _SupervisorDashboardState extends State<SupervisorDashboard> {
     if (_currentUser == null) return null;
     try {
       final doc = await FirebaseFirestore.instance.collection('users').doc(_currentUser!.uid).get();
-      if (doc.exists && mounted) { // Added mounted check
+      if (doc.exists && mounted) {
         final userData = UserData.fromFirestore(doc);
         // Only update state if still null (listener might be faster)
         if (_supervisorData == null) {
@@ -65,21 +66,25 @@ class _SupervisorDashboardState extends State<SupervisorDashboard> {
     return null; // Return null if fetch fails or user doesn't exist
   }
 
-
-  // Listen for real-time updates to user data (like lastRead timestamp)
-  void _setupUserDataListener() {
-    if (_currentUser == null) return;
-    _userDataListener = FirebaseFirestore.instance
+  // --- NEW: Helper to create the user data stream ---
+  Stream<UserData?> _userDataListenerStream() {
+    if (_currentUser == null) return Stream.value(null);
+    return FirebaseFirestore.instance
         .collection('users')
         .doc(_currentUser!.uid)
         .snapshots()
         .map((doc) => doc.exists ? UserData.fromFirestore(doc) : null)
         .handleError((error) {
       debugPrint("Error listening to user data: $error");
-      return null;
+      return null; // Propagate null on error
     });
+  }
+  // --- END NEW HELPER ---
 
-    _userDataListener?.listen((userData) {
+  // Listen for real-time updates to user data (like lastRead timestamp)
+  void _setupUserDataListener() {
+    if (_currentUser == null) return;
+    _userDataSubscription = _userDataListenerStream().listen((userData) {
       if (userData != null && mounted) {
         bool needsRebuildForData = false;
         // Check if supervisor data needs updating (for UI elements relying directly on it)
@@ -89,12 +94,17 @@ class _SupervisorDashboardState extends State<SupervisorDashboard> {
         }
 
         // Update last read timestamp and re-setup stream if it changed
-        if (_lastReadTimestamp != userData.lastReadAnnouncementsTimestamp) {
-          _lastReadTimestamp = userData.lastReadAnnouncementsTimestamp;
+        // Check if timestamp is actually different before resetting stream
+        final newTimestamp = userData.lastReadAnnouncementsTimestamp;
+        // --- FIX: Use direct comparison for Timestamps ---
+        if (_lastReadTimestamp != newTimestamp) {
+          // ---------------------------------------------
+          _lastReadTimestamp = newTimestamp;
           // Also update the stored _supervisorData instance
           _supervisorData = userData;
           _setupNewAnnouncementsStream(); // Re-setup stream with new timestamp
         }
+
 
         // Trigger rebuild if core data changed and the initial future might not be complete yet
         if (needsRebuildForData) {
@@ -116,40 +126,57 @@ class _SupervisorDashboardState extends State<SupervisorDashboard> {
 
   // Setup the stream to listen for new announcements
   void _setupNewAnnouncementsStream() {
-    if (_supervisorData == null) return;
+    // Cancel previous subscription if exists
+    _newAnnouncementsSubscription?.cancel();
 
-    final query = FirebaseFirestore.instance
+    if (_supervisorData == null || _supervisorData!.wardId.isEmpty) return;
+
+    // Listen for announcements newer than last read, in relevant wards
+    Query query = FirebaseFirestore.instance
         .collection('announcements')
         .where('wardId', whereIn: [null, _supervisorData!.wardId]) // Global or own ward
         .orderBy('createdAt', descending: true);
 
-    Stream<QuerySnapshot> effectiveStream;
-    // If there's a last read timestamp, only query newer ones
+    // Apply timestamp filter if available
     if (_lastReadTimestamp != null) {
-      effectiveStream = query.where('createdAt', isGreaterThan: _lastReadTimestamp!).snapshots();
+      query = query.where('createdAt', isGreaterThan: _lastReadTimestamp!);
     } else {
-      effectiveStream = query.limit(1).snapshots(); // Check if at least one exists if never read
+      // If never read, limit to 1 to just check existence easily
+      query = query.limit(1);
     }
 
-    // Assign to state variable and listen
-    _newAnnouncementsStream = effectiveStream;
-    _newAnnouncementsStream?.listen((snapshot) {
+    _listenForAnnouncements(query);
+  }
+
+  // Helper to actually listen to the announcement query stream
+  void _listenForAnnouncements(Query query) {
+    _newAnnouncementsSubscription = query.snapshots().listen((snapshot) {
       if (mounted) {
         final bool hasNew = snapshot.docs.isNotEmpty;
-        if (_hasNewAnnouncements != hasNew){ // Only call setState if value changes
+        // Only call setState if the value actually changes
+        if (_hasNewAnnouncements != hasNew) {
           setState(() {
             _hasNewAnnouncements = hasNew;
           });
         }
       }
-    }, onError: (error){
+    }, onError: (error) {
       debugPrint("Error listening to announcements stream: $error");
-      if(mounted && _hasNewAnnouncements) { // Only call setState if value changes
+      // Only call setState if the value changes
+      if (mounted && _hasNewAnnouncements) {
         setState(() {
           _hasNewAnnouncements = false; // Assume no new ones on error
         });
       }
     });
+  }
+
+
+  @override
+  void dispose() {
+    _newAnnouncementsSubscription?.cancel(); // Cancel listener
+    _userDataSubscription?.cancel(); // Cancel user data listener
+    super.dispose();
   }
 
 
@@ -236,13 +263,15 @@ class _SupervisorDashboardState extends State<SupervisorDashboard> {
                   // --- Announcement Icon with Indicator ---
                   IconButton(
                     icon: Stack(
-                      clipBehavior: Clip.none,
+                      clipBehavior: Clip.none, // Allow dot to overflow
                       children: [
-                        const Icon(Icons.campaign_outlined),
+                        // --- CHANGE ICON BACK TO BELL ---
+                        const Icon(Icons.notifications_outlined),
+                        // -------------------------------
                         if (_hasNewAnnouncements)
                           Positioned(
-                            top: -4,
-                            right: -4,
+                            top: -4, // Adjust position
+                            right: -4, // Adjust position
                             child: Container(
                               width: 10, // Size of the dot
                               height: 10,
@@ -259,11 +288,13 @@ class _SupervisorDashboardState extends State<SupervisorDashboard> {
                       Navigator.of(context)
                           .push(MaterialPageRoute(builder: (_) => AnnouncementsScreen(userData: supervisorData))) // Pass user data
                           .then((_) {
-                        // No explicit refresh needed here, the listener will handle it
-                        debugPrint("Returned from announcements screen.");
+                        // Trigger re-check after returning
+                        debugPrint("Returned from announcements screen. Re-checking supervisor announcements.");
+                        _setupNewAnnouncementsStream();
                       });
                     },
                   ),
+                  // --- End Announcement Icon ---
                   IconButton(
                     icon: const Icon(Icons.account_circle_outlined),
                     tooltip: 'My Profile',

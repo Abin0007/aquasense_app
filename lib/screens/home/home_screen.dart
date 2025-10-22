@@ -22,6 +22,7 @@ import 'package:aquasense/screens/home/components/quick_action_card.dart';
 import 'package:aquasense/screens/home/components/water_usage_card.dart';
 import 'package:aquasense/utils/auth_service.dart';
 import 'package:url_launcher/url_launcher.dart';
+import 'dart:async'; // Import async for StreamSubscription
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -39,10 +40,10 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // --- State for Announcement Indicator ---
   bool _hasNewAnnouncements = false;
-  Stream<QuerySnapshot>? _newAnnouncementsStream;
+  StreamSubscription? _newAnnouncementsSubscription; // Renamed for clarity
   Timestamp? _lastReadTimestamp;
   UserData? _citizenData; // Store citizen data
-  Stream<UserData?>? _userDataListener; // Listener for user data changes
+  StreamSubscription? _userDataSubscription; // Renamed for clarity
 
 
   @override
@@ -51,10 +52,26 @@ class _HomeScreenState extends State<HomeScreen> {
     // Start listening for user data changes immediately
     _setupUserDataListener();
     // Use the listener stream as the primary source for the FutureBuilder
-    _userDataStream = _userDataListener ?? Stream.value(null);
+    _userDataStream = _userDataListenerStream(); // Helper to create the stream
     // Trigger an initial fetch as well for faster first load
     _fetchInitialCitizenData();
   }
+
+  // --- NEW: Helper to create the user data stream ---
+  Stream<UserData?> _userDataListenerStream() {
+    if (currentUser == null) return Stream.value(null);
+    return FirebaseFirestore.instance
+        .collection('users')
+        .doc(currentUser!.uid)
+        .snapshots()
+        .map((doc) => doc.exists ? UserData.fromFirestore(doc) : null)
+        .handleError((error) {
+      debugPrint("Error listening to user data: $error");
+      return null; // Propagate null on error
+    });
+  }
+  // --- END NEW HELPER ---
+
 
   // Fetch initial data for faster loading
   Future<void> _fetchInitialCitizenData() async {
@@ -81,17 +98,8 @@ class _HomeScreenState extends State<HomeScreen> {
   // Listen for real-time updates to user data (like lastRead timestamp)
   void _setupUserDataListener() {
     if (currentUser == null) return;
-    _userDataListener = FirebaseFirestore.instance
-        .collection('users')
-        .doc(currentUser!.uid)
-        .snapshots()
-        .map((doc) => doc.exists ? UserData.fromFirestore(doc) : null)
-        .handleError((error) {
-      debugPrint("Error listening to user data: $error");
-      return null;
-    });
-
-    _userDataListener?.listen((userData) {
+    // Use the helper stream
+    _userDataSubscription = _userDataListenerStream().listen((userData) {
       if (userData != null && mounted) {
         bool needsRebuild = false;
         // Check if citizen data actually changed (to avoid unnecessary rebuilds)
@@ -101,11 +109,15 @@ class _HomeScreenState extends State<HomeScreen> {
         }
 
         // Update last read timestamp and re-setup stream if it changed
-        if (_lastReadTimestamp != userData.lastReadAnnouncementsTimestamp) {
-          _lastReadTimestamp = userData.lastReadAnnouncementsTimestamp;
+        // Check if timestamp is actually different before resetting stream
+        final newTimestamp = userData.lastReadAnnouncementsTimestamp;
+        // --- FIX: Use direct comparison for Timestamps ---
+        if (_lastReadTimestamp != newTimestamp) {
+          // ---------------------------------------------
+          _lastReadTimestamp = newTimestamp;
           _setupNewAnnouncementsStream(); // Re-setup stream with new timestamp
-          // No need for needsRebuild = true here, stream listener will update indicator
         }
+
 
         // Trigger prediction if needed (e.g., connection status changed)
         _triggerPredictionIfNeeded(userData);
@@ -124,41 +136,65 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // Setup the stream to listen for new announcements
   void _setupNewAnnouncementsStream() {
-    if (_citizenData == null) return;
+    // Cancel previous subscription if exists
+    _newAnnouncementsSubscription?.cancel();
 
-    final query = FirebaseFirestore.instance
+    if (_citizenData == null || _citizenData!.wardId.isEmpty) {
+      // If wardId is empty (e.g., during profile completion), only listen for global
+      _listenForAnnouncements(FirebaseFirestore.instance
+          .collection('announcements')
+          .where('wardId', isEqualTo: null) // Global only
+          .orderBy('createdAt', descending: true));
+      return;
+    };
+
+    // Listen for announcements newer than last read, in relevant wards
+    Query query = FirebaseFirestore.instance
         .collection('announcements')
         .where('wardId', whereIn: [null, _citizenData!.wardId]) // Global or own ward
         .orderBy('createdAt', descending: true);
 
-    Stream<QuerySnapshot> effectiveStream;
-    // If there's a last read timestamp, only query newer ones
+    // Apply timestamp filter if available
     if (_lastReadTimestamp != null) {
-      effectiveStream = query.where('createdAt', isGreaterThan: _lastReadTimestamp!).snapshots();
+      query = query.where('createdAt', isGreaterThan: _lastReadTimestamp!);
     } else {
-      effectiveStream = query.limit(1).snapshots(); // Check if at least one exists if never read
+      // If never read, limit to 1 to just check existence easily
+      query = query.limit(1);
     }
 
-    // Assign and listen
-    _newAnnouncementsStream = effectiveStream;
-    _newAnnouncementsStream?.listen((snapshot) {
+    _listenForAnnouncements(query);
+  }
+
+  // Helper to actually listen to the announcement query stream
+  void _listenForAnnouncements(Query query) {
+    _newAnnouncementsSubscription = query.snapshots().listen((snapshot) {
       if (mounted) {
         final bool hasNew = snapshot.docs.isNotEmpty;
-        if (_hasNewAnnouncements != hasNew){ // Only update state if value changes
+        // Only call setState if the value actually changes
+        if (_hasNewAnnouncements != hasNew) {
           setState(() {
             _hasNewAnnouncements = hasNew;
           });
         }
       }
-    }, onError: (error){
+    }, onError: (error) {
       debugPrint("Error listening to announcements stream: $error");
-      if(mounted && _hasNewAnnouncements) { // Only update state if value changes
+      // Only call setState if the value changes
+      if (mounted && _hasNewAnnouncements) {
         setState(() {
           _hasNewAnnouncements = false; // Assume no new ones on error
         });
       }
     });
   }
+
+  @override
+  void dispose() {
+    _newAnnouncementsSubscription?.cancel(); // Cancel listener
+    _userDataSubscription?.cancel(); // Cancel user data listener
+    super.dispose();
+  }
+
 
   // Helper to trigger prediction
   void _triggerPredictionIfNeeded(UserData userData) {
@@ -327,7 +363,14 @@ class _HomeScreenState extends State<HomeScreen> {
           }
 
           // Use the latest available citizen data (_citizenData is updated by listener)
-          final userData = _citizenData!;
+          // Ensure _citizenData is not null before proceeding
+          final userData = _citizenData;
+          if (userData == null) {
+            // This case should ideally be handled by the error/loading logic above
+            // but added as a safeguard.
+            return const Center(child: Text('User data not available.', style: TextStyle(color: Colors.orangeAccent)));
+          }
+
 
           return Container(
             decoration: const BoxDecoration(
@@ -347,8 +390,11 @@ class _HomeScreenState extends State<HomeScreen> {
                     Navigator.of(context).push(
                         MaterialPageRoute(builder: (_) => AnnouncementsScreen(userData: userData)) // Pass user data
                     ).then((_) {
-                      // No explicit refresh needed, listener handles timestamp update
-                      debugPrint("Returned from announcements screen.");
+                      // Trigger a manual check/reset of the stream after returning
+                      // This ensures the dot clears immediately if the timestamp was updated
+                      debugPrint("Returned from announcements screen. Re-checking announcements.");
+                      // Resetting the stream ensures it uses the potentially updated timestamp
+                      _setupNewAnnouncementsStream();
                     });
                   },
                 ),
@@ -605,13 +651,15 @@ class HomeHeader extends StatelessWidget {
             // --- Icon with Indicator ---
             IconButton(
               icon: Stack(
-                clipBehavior: Clip.none,
+                clipBehavior: Clip.none, // Allow dot to overflow
                 children: [
-                  const Icon(Icons.campaign_outlined, color: Colors.white, size: 30), // Changed icon
+                  // --- CHANGE ICON BACK TO BELL ---
+                  const Icon(Icons.notifications_outlined, color: Colors.white, size: 30),
+                  // -------------------------------
                   if (hasNewAnnouncements)
                     Positioned(
-                      top: -4,
-                      right: -4,
+                      top: -4, // Adjust position as needed
+                      right: -4, // Adjust position as needed
                       child: Container(
                         width: 10, // Size of the dot
                         height: 10,

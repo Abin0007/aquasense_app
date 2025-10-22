@@ -74,6 +74,26 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
   }
   // --- End Location Functions ---
 
+  // --- *** MOVED HELPER FUNCTION HERE *** ---
+  // --- Helper for Dropdown Styles (applied to dropdown itself) ---
+  DropDownDecoratorProps _getDropdownStyle(String hint, IconData icon) {
+    return DropDownDecoratorProps(
+      baseStyle: const TextStyle(color: Colors.white), // Ensure dropdown text is white
+      dropdownSearchDecoration: InputDecoration(
+        hintText: hint,
+        hintStyle: const TextStyle(color: Colors.white70),
+        prefixIcon: Icon(icon, color: Colors.white70),
+        filled: true,
+        fillColor: Colors.black.withAlpha(77), // 30% Opacity approx
+        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: const BorderSide(color: Colors.white30)),
+        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: const BorderSide(color: Colors.cyanAccent)),
+      ),
+    );
+  }
+  // --- *** END MOVED HELPER FUNCTION *** ---
+
 
   // --- MODIFIED Function to show role update dialog ---
   void _showUpdateRoleDialog(UserData currentUserData) {
@@ -190,7 +210,9 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
                       ),
                       items: _dialogStates,
                       enabled: !_isDialogLoadingStates,
+                      // --- Use the moved helper function ---
                       dropdownDecoratorProps: _getDropdownStyle(
+                        // ------------------------------------
                           _isDialogLoadingStates ? "Loading States..." : "Select State",
                           Icons.map_outlined),
                       onChanged: (value) {
@@ -232,7 +254,9 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
                         ),
                         items: _dialogDistricts,
                         enabled: !_isDialogLoadingDistricts && _dialogDistricts.isNotEmpty,
+                        // --- Use the moved helper function ---
                         dropdownDecoratorProps: _getDropdownStyle(
+                          // ------------------------------------
                             _isDialogLoadingDistricts ? "Loading Districts..." : (_dialogDistricts.isEmpty ? "No Districts Found" : "Select District"),
                             Icons.location_city),
                         onChanged: (value) {
@@ -271,7 +295,9 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
                         ),
                         items: _dialogWards,
                         enabled: !_isDialogLoadingWards && _dialogWards.isNotEmpty,
+                        // --- Use the moved helper function ---
                         dropdownDecoratorProps: _getDropdownStyle(
+                          // ------------------------------------
                             _isDialogLoadingWards ? "Loading Wards..." : (_dialogWards.isEmpty ? "No Wards Found" : "Select Ward"),
                             Icons.maps_home_work_outlined),
                         onChanged: (value) {
@@ -608,22 +634,4 @@ class _UserDetailScreenState extends State<UserDetailScreen> {
     );
   }
 
-  // --- Helper for Dropdown Styles (applied to dropdown itself) ---
-  DropDownDecoratorProps _getDropdownStyle(String hint, IconData icon) {
-    return DropDownDecoratorProps(
-      baseStyle: const TextStyle(color: Colors.white), // Ensure dropdown text is white
-      dropdownSearchDecoration: InputDecoration(
-        hintText: hint,
-        hintStyle: const TextStyle(color: Colors.white70),
-        prefixIcon: Icon(icon, color: Colors.white70),
-        filled: true,
-        fillColor: Colors.black.withAlpha(77), // 30% Opacity approx
-        contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 15),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: BorderSide.none),
-        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: const BorderSide(color: Colors.white30)),
-        focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(15), borderSide: const BorderSide(color: Colors.cyanAccent)),
-      ),
-    );
-  }
-// --- End Helper ---
-}
+} // End of _UserDetailScreenState class
