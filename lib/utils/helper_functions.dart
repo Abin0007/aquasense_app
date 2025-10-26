@@ -27,3 +27,4 @@ class HelperFunctions {
     showSnackBar(context, message, color: Colors.red);
   }
 }
+
