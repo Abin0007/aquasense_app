@@ -9,8 +9,9 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:lottie/lottie.dart';
+import 'package:flutter/foundation.dart'; // Import for debugPrint
 
-class ReportLeakScreen extends StatefulWidget {
+class ReportLeakScreen extends StatefulWidget { // <-- Class Definition
   const ReportLeakScreen({super.key});
 
   @override
@@ -29,6 +30,7 @@ class _ReportLeakScreenState extends State<ReportLeakScreen> with TickerProvider
   XFile? _imageFile;
   Position? _currentPosition;
   bool _isLocationLoading = false;
+  bool _isSubmitting = false; // <-- New state variable for loading
 
   final FirestoreService _firestoreService = FirestoreService();
   final StorageService _storageService = StorageService();
@@ -45,18 +47,28 @@ class _ReportLeakScreenState extends State<ReportLeakScreen> with TickerProvider
     final user = FirebaseAuth.instance.currentUser;
     bool hasConnection = false;
     if (user != null) {
-      final userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
-      if (userDoc.exists) {
-        hasConnection = userDoc.data()?['hasActiveConnection'] ?? false;
+      try {
+        final userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+        if (userDoc.exists) {
+          hasConnection = userDoc.data()?['hasActiveConnection'] ?? false;
+        }
+      } catch (e) {
+        debugPrint("Error fetching user connection status: $e");
+        // Assume no connection if there's an error fetching
       }
     }
 
     if (mounted) {
       setState(() {
         _complaintTypes = hasConnection ? _allComplaintTypes : _limitedComplaintTypes;
+        // Ensure selected type is valid if list changes
+        if (_selectedComplaintType != null && !_complaintTypes.contains(_selectedComplaintType)) {
+          _selectedComplaintType = null;
+        }
       });
     }
   }
+
 
   @override
   void dispose() {
@@ -67,49 +79,78 @@ class _ReportLeakScreenState extends State<ReportLeakScreen> with TickerProvider
 
   Future<void> _pickImage(ImageSource source) async {
     final ImagePicker picker = ImagePicker();
-    final XFile? pickedFile = await picker.pickImage(source: source);
-    if (pickedFile != null) {
-      setState(() => _imageFile = pickedFile);
+    try {
+      final XFile? pickedFile = await picker.pickImage(source: source, imageQuality: 70); // Added imageQuality
+      if (pickedFile != null) {
+        // Optional: Check file size
+        final file = File(pickedFile.path);
+        if (await file.length() > 5 * 1024 * 1024) { // 5MB limit
+          if (mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('Image size exceeds 5MB limit.'),
+              backgroundColor: Colors.orange,
+            ));
+          }
+          return;
+        }
+        setState(() => _imageFile = pickedFile);
+      }
+    } catch (e) {
+      debugPrint("Error picking image: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error picking image: ${e.toString()}')),
+        );
+      }
     }
   }
 
+
   Future<void> _getCurrentLocation() async {
+    if (!mounted) return;
     setState(() => _isLocationLoading = true);
     final scaffoldMessenger = ScaffoldMessenger.of(context);
     try {
+      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        if (mounted) scaffoldMessenger.showSnackBar(const SnackBar(content: Text('Location services are disabled.')));
+        setState(() => _isLocationLoading = false);
+        return;
+      }
+
       LocationPermission permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
         if (permission == LocationPermission.denied) {
-          scaffoldMessenger.showSnackBar(
-            const SnackBar(content: Text('Location permissions are denied.')),
-          );
+          if (mounted) scaffoldMessenger.showSnackBar(const SnackBar(content: Text('Location permissions are denied.')));
           setState(() => _isLocationLoading = false);
           return;
         }
       }
 
       if (permission == LocationPermission.deniedForever) {
-        scaffoldMessenger.showSnackBar(
-          const SnackBar(content: Text('Location permissions are permanently denied.')),
-        );
+        if (mounted) scaffoldMessenger.showSnackBar(const SnackBar(content: Text('Location permissions are permanently denied.')));
         setState(() => _isLocationLoading = false);
         return;
       }
 
-      Position? position = await Geolocator.getLastKnownPosition();
-      position ??= await Geolocator.getCurrentPosition(
-        desiredAccuracy: LocationAccuracy.medium,
-        timeLimit: const Duration(seconds: 5),
+      // Fetch position only if permission granted
+      Position position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.medium, // Medium accuracy is often sufficient
       );
 
-      setState(() {
-        _currentPosition = position;
-      });
+      if (mounted) {
+        setState(() {
+          _currentPosition = position;
+        });
+      }
     } catch (e) {
-      scaffoldMessenger.showSnackBar(
-        SnackBar(content: Text('Could not get location: $e')),
-      );
+      debugPrint("Error getting location: $e");
+      if (mounted) {
+        scaffoldMessenger.showSnackBar(
+          SnackBar(content: Text('Could not get location: $e')),
+        );
+      }
     } finally {
       if (mounted) {
         setState(() => _isLocationLoading = false);
@@ -117,34 +158,47 @@ class _ReportLeakScreenState extends State<ReportLeakScreen> with TickerProvider
     }
   }
 
+
   // --- MODIFIED SUBMISSION LOGIC ---
-  void _submitComplaint() {
+  Future<void> _submitComplaint() async { // Changed to async
+    if (_isSubmitting) return; // Prevent double submission
+
     if (!_formKey.currentState!.validate()) return;
     if (_selectedComplaintType == null) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Please select a complaint type.')));
       return;
     }
 
-    // Show success dialog immediately
-    _showSuccessDialog();
+    // --- Show Loading Indicator ---
+    if (mounted) {
+      setState(() => _isSubmitting = true);
+    }
 
-    // Perform the actual submission in the background
-    _performBackgroundSubmission();
-  }
+    final scaffoldMessenger = ScaffoldMessenger.of(context); // Capture context
 
-  Future<void> _performBackgroundSubmission() async {
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) throw Exception("User not logged in.");
 
+      // 1. Upload image (if exists)
       String? imageUrl;
       if (_imageFile != null) {
+        debugPrint("Attempting to upload complaint image...");
         imageUrl = await _storageService.uploadComplaintImage(_imageFile!, user.uid);
+        debugPrint("Image uploaded successfully: $imageUrl");
       }
 
-      final userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
-      final userWardId = userDoc.data()?['wardId'] ?? 'unknown';
+      // 2. Get User's Ward ID
+      String userWardId = 'unknown'; // Default value
+      try {
+        final userDoc = await FirebaseFirestore.instance.collection('users').doc(user.uid).get();
+        userWardId = userDoc.data()?['wardId'] ?? 'unknown';
+      } catch (e) {
+        debugPrint("Could not fetch user ward ID, using 'unknown'. Error: $e");
+      }
 
+
+      // 3. Create Complaint Object
       final complaint = Complaint(
         userId: user.uid,
         type: _selectedComplaintType!,
@@ -155,20 +209,56 @@ class _ReportLeakScreenState extends State<ReportLeakScreen> with TickerProvider
             ? GeoPoint(_currentPosition!.latitude, _currentPosition!.longitude)
             : null,
         createdAt: Timestamp.now(),
+        status: 'Submitted', // Initial status
+        statusHistory: [ // Add initial status to history
+          ComplaintStatusUpdate(
+            status: 'Submitted',
+            updatedAt: Timestamp.now(),
+            updatedBy: user.uid, // User submitted it
+          ),
+        ],
       );
 
+      // 4. Submit to Firestore
+      debugPrint("Attempting to submit complaint to Firestore...");
       await _firestoreService.submitComplaint(complaint);
-      debugPrint("Background complaint submission successful.");
+      debugPrint("Complaint submitted successfully to Firestore.");
+
+      // 5. Show Success Dialog (ONLY if everything succeeded)
+      if (mounted) {
+        _showSuccessDialog();
+      }
+
     } catch (e) {
-      debugPrint("Background complaint submission failed: $e");
+      // 6. Show Error Message on Failure
+      debugPrint("Complaint submission failed: $e");
+      // Use captured context
+      if (scaffoldMessenger.mounted) {
+        scaffoldMessenger.showSnackBar(
+          SnackBar(
+            content: Text('Failed to submit complaint: ${e.toString()}'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      // 7. Hide Loading Indicator
+      if (mounted) {
+        setState(() => _isSubmitting = false);
+      }
     }
   }
+  // --- END MODIFIED SUBMISSION LOGIC ---
+
+  // _performBackgroundSubmission removed as logic is now inside _submitComplaint
 
   void _showSuccessDialog() {
+    // Check if context is still valid before showing dialog
+    if (!mounted) return;
     showDialog(
         context: context,
         barrierDismissible: false,
-        builder: (context) => AlertDialog(
+        builder: (dialogContext) => AlertDialog( // Use dialogContext
           backgroundColor: const Color(0xFF2C5364),
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
           content: Column(
@@ -186,8 +276,11 @@ class _ReportLeakScreenState extends State<ReportLeakScreen> with TickerProvider
           actions: [
             TextButton(
               onPressed: () {
-                Navigator.of(context).pop(); // Close Dialog
-                Navigator.of(context).pop(); // Go back from report screen
+                Navigator.of(dialogContext).pop(); // Close Dialog using dialogContext
+                // Check mount status *again* before popping the screen context
+                if (mounted) {
+                  Navigator.of(context).pop(); // Go back from report screen
+                }
               },
               child: const Text("OK", style: TextStyle(color: Colors.cyanAccent)),
             ),
@@ -195,7 +288,8 @@ class _ReportLeakScreenState extends State<ReportLeakScreen> with TickerProvider
         ));
   }
 
-  // The rest of your build method and other helpers remain the same
+  // Build method and other helpers remain mostly the same,
+  // but the submit button needs to handle the _isSubmitting state.
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -224,6 +318,7 @@ class _ReportLeakScreenState extends State<ReportLeakScreen> with TickerProvider
                 hintText: 'Describe the issue...',
                 icon: Icons.description_outlined,
                 glowAnimation: _glowController,
+                maxLines: 4, // Allow more lines for description
                 validator: (value) => value!.trim().isEmpty ? 'Description cannot be empty.' : null,
               ),
               const SizedBox(height: 20),
@@ -231,16 +326,28 @@ class _ReportLeakScreenState extends State<ReportLeakScreen> with TickerProvider
               const SizedBox(height: 20),
               _buildLocationPicker(),
               const SizedBox(height: 30),
+              // --- Updated Submit Button ---
               ElevatedButton(
-                onPressed: _submitComplaint,
+                onPressed: _isSubmitting ? null : _submitComplaint, // Disable button when submitting
                 style: ElevatedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 16),
                   backgroundColor: Colors.cyanAccent,
                   foregroundColor: Colors.black,
                   shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                  disabledBackgroundColor: Colors.grey[600], // Visual feedback when disabled
                 ),
-                child: const Text('Submit Complaint', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                child: _isSubmitting
+                    ? const SizedBox(
+                  height: 24,
+                  width: 24,
+                  child: CircularProgressIndicator(strokeWidth: 2, color: Colors.black),
+                )
+                    : const Text(
+                  'Submit Complaint',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
               ),
+              // --- End Updated Submit Button ---
             ],
           ),
         ),
@@ -254,21 +361,38 @@ class _ReportLeakScreenState extends State<ReportLeakScreen> with TickerProvider
       items: _complaintTypes.map((String value) {
         return DropdownMenuItem<String>(
           value: value,
-          child: Text(value),
+          child: Text(value, style: const TextStyle(color: Colors.white)), // Ensure text is white
         );
       }).toList(),
       onChanged: (newValue) => setState(() => _selectedComplaintType = newValue),
+      // Style the dropdown itself
+      dropdownColor: const Color(0xFF203A43), // Background color of the dropdown list
+      style: const TextStyle(color: Colors.white), // Style for the selected item display
+      iconEnabledColor: Colors.white70, // Color of the dropdown arrow
       decoration: InputDecoration(
         hintText: 'Type of Complaint',
         hintStyle: const TextStyle(color: Colors.white70),
         prefixIcon: const Icon(Icons.category_outlined, color: Colors.white70),
         filled: true,
-        fillColor: const Color.fromRGBO(255, 255, 255, 0.2),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(30), borderSide: BorderSide.none),
+        fillColor: const Color.fromRGBO(255, 255, 255, 0.1), // Slightly transparent background
+        contentPadding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(30),
+          borderSide: BorderSide.none,
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(30),
+          borderSide: const BorderSide(color: Color.fromRGBO(255, 255, 255, 0.3)), // Subtle border
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(30),
+          borderSide: const BorderSide(color: Colors.cyanAccent, width: 1.5), // Highlight border on focus
+        ),
       ),
       validator: (value) => value == null ? 'Please select a complaint type.' : null,
     );
   }
+
 
   Widget _buildImagePicker() {
     return Column(
@@ -283,7 +407,14 @@ class _ReportLeakScreenState extends State<ReportLeakScreen> with TickerProvider
           ),
           child: _imageFile != null
               ? ClipRRect(borderRadius: BorderRadius.circular(20), child: Image.file(File(_imageFile!.path), fit: BoxFit.contain))
-              : const Center(child: Text('No image selected.', style: TextStyle(color: Colors.white70))),
+              : const Center(child: Column( // Added icon and text for clarity
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.image_search, color: Colors.white70, size: 40),
+              SizedBox(height: 8),
+              Text('No image selected.', style: TextStyle(color: Colors.white70)),
+            ],
+          )),
         ),
         const SizedBox(height: 12),
         Row(
@@ -314,6 +445,7 @@ class _ReportLeakScreenState extends State<ReportLeakScreen> with TickerProvider
           decoration: BoxDecoration(
             color: const Color.fromRGBO(255, 255, 255, 0.1),
             borderRadius: BorderRadius.circular(15),
+            border: Border.all(color: Colors.white.withAlpha(51)),
           ),
           child: _currentPosition == null
               ? const Text(
@@ -322,21 +454,21 @@ class _ReportLeakScreenState extends State<ReportLeakScreen> with TickerProvider
             textAlign: TextAlign.center,
           )
               : Text(
-            'Location Attached:\nLat: ${_currentPosition!.latitude.toStringAsFixed(4)}, Lon: ${_currentPosition!.longitude.toStringAsFixed(4)}',
+            'Location Attached:\nLat: ${_currentPosition!.latitude.toStringAsFixed(6)}, Lon: ${_currentPosition!.longitude.toStringAsFixed(6)}', // Increased precision
             style: const TextStyle(color: Colors.greenAccent),
             textAlign: TextAlign.center,
           ),
         ),
         const SizedBox(height: 12),
-        if (_isLocationLoading)
-          const CircularProgressIndicator()
-        else
-          TextButton.icon(
-            onPressed: _getCurrentLocation,
-            icon: const Icon(Icons.my_location, color: Colors.cyanAccent),
-            label: const Text('Attach Current Location', style: TextStyle(color: Colors.cyanAccent)),
-          ),
+        _isLocationLoading
+            ? const Padding(padding: EdgeInsets.all(8.0), child: CircularProgressIndicator(color: Colors.cyanAccent))
+            : TextButton.icon(
+          onPressed: _getCurrentLocation,
+          icon: const Icon(Icons.my_location, color: Colors.cyanAccent),
+          label: const Text('Attach Current Location', style: TextStyle(color: Colors.cyanAccent)),
+        ),
       ],
     );
   }
-}
+
+} // End of _ReportLeakScreenState

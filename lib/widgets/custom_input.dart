@@ -9,8 +9,9 @@ class CustomInput extends StatefulWidget {
   final String? Function(String?)? validator;
   final TextInputType keyboardType;
   final Animation<double> glowAnimation;
-  final bool readOnly; // ADDED THIS LINE
-  final VoidCallback? onTap; // ADDED THIS LINE
+  final bool readOnly;
+  final VoidCallback? onTap;
+  final int? maxLines; // <-- ADDED THIS LINE
 
   const CustomInput({
     super.key,
@@ -21,8 +22,9 @@ class CustomInput extends StatefulWidget {
     this.validator,
     this.keyboardType = TextInputType.text,
     required this.glowAnimation,
-    this.readOnly = false, // ADDED THIS LINE
-    this.onTap, // ADDED THIS LINE
+    this.readOnly = false,
+    this.onTap,
+    this.maxLines = 1, // <-- ADDED THIS LINE (default to 1 line)
   });
 
   @override
@@ -76,8 +78,9 @@ class _CustomInputState extends State<CustomInput> {
         controller: widget.controller,
         obscureText: widget.isPassword ? _obscureText : false,
         keyboardType: widget.keyboardType,
-        readOnly: widget.readOnly, // ADDED THIS LINE
-        onTap: widget.onTap, // ADDED THIS LINE
+        readOnly: widget.readOnly,
+        onTap: widget.onTap,
+        maxLines: widget.isPassword ? 1 : widget.maxLines, // <-- USE maxLines HERE (force 1 for password)
         inputFormatters: [FilteringTextInputFormatter.deny(RegExp(r'^\s*'))],
         style: const TextStyle(color: Colors.white),
         validator: (value) {

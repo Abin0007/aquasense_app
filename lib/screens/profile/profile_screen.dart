@@ -7,7 +7,7 @@ import 'package:aquasense/screens/profile/components/profile_menu_item.dart';
 import 'package:aquasense/screens/profile/contact_screen.dart';
 import 'package:aquasense/screens/profile/edit_profile_screen.dart';
 import 'package:aquasense/screens/profile/my_qr_code_screen.dart';
-import 'package:aquasense/screens/profile/notification_settings_screen.dart';
+// REMOVED: import 'package:aquasense/screens/profile/notification_settings_screen.dart';
 import 'package:aquasense/utils/auth_service.dart';
 import 'package:aquasense/utils/page_transition.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -152,14 +152,15 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
           final userData = UserData.fromFirestore(snapshot.data!);
 
+          // *** MODIFICATION START: Removed interval animation wrapper ***
           return ListView(
             padding: const EdgeInsets.all(24),
             children: [
-              _buildProfileHeader(userData),
+              _buildProfileHeader(userData).animate().fadeIn().slideX(begin: -0.1), // Animate header individually
               const SizedBox(height: 30),
-              _buildInfoCard(userData),
+              _buildInfoCard(userData).animate().fadeIn().slideX(begin: -0.1), // Animate info card individually
               const SizedBox(height: 30),
-              _buildSectionTitle("Account"),
+              _buildSectionTitle("Account").animate().fadeIn().slideX(begin: -0.1), // Animate section individually
               ProfileMenuItem(
                 title: 'Edit Profile',
                 icon: Icons.person_outline,
@@ -168,7 +169,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     SlideFadeRoute(page: EditProfileScreen(userData: userData)),
                   );
                 },
-              ),
+              ).animate().fadeIn().slideX(begin: -0.1), // Animate item individually
               const SizedBox(height: 16),
               StreamBuilder<ConnectionRequest?>(
                 stream: getConnectionRequestStream(),
@@ -184,7 +185,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                           ));
                         }
                       },
-                    );
+                    ).animate().fadeIn().slideX(begin: -0.1); // Animate item individually
                   }
                   return const SizedBox.shrink();
                 },
@@ -199,21 +200,23 @@ class _ProfileScreenState extends State<ProfileScreen> {
                       SlideFadeRoute(page: const MyQrCodeScreen()),
                     );
                   },
-                ),
+                ).animate().fadeIn().slideX(begin: -0.1), // Animate item individually
               ],
+              // *** REMOVED "Settings & Information" Section Start ***
+              // const SizedBox(height: 30),
+              // _buildSectionTitle("Settings & Information"),
+              // ProfileMenuItem(
+              //   title: 'Notifications',
+              //   icon: Icons.notifications_outlined,
+              //   onTap: () {
+              //     Navigator.of(context).push(
+              //       SlideFadeRoute(page: const NotificationSettingsScreen()),
+              //     );
+              //   },
+              // ),
+              // *** REMOVED "Settings & Information" Section End ***
               const SizedBox(height: 30),
-              _buildSectionTitle("Settings & Information"),
-              ProfileMenuItem(
-                title: 'Notifications',
-                icon: Icons.notifications_outlined,
-                onTap: () {
-                  Navigator.of(context).push(
-                    SlideFadeRoute(page: const NotificationSettingsScreen()),
-                  );
-                },
-              ),
-              const SizedBox(height: 30),
-              _buildSectionTitle("Help & Support"),
+              _buildSectionTitle("Help & Support").animate().fadeIn().slideX(begin: -0.1), // Animate section individually
               ProfileMenuItem(
                 title: 'Contact Us',
                 icon: Icons.support_agent_outlined,
@@ -222,7 +225,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     SlideFadeRoute(page: const ContactScreen()),
                   );
                 },
-              ),
+              ).animate().fadeIn().slideX(begin: -0.1), // Animate item individually
               const SizedBox(height: 16),
               ProfileMenuItem(
                 title: 'About AquaSense',
@@ -232,16 +235,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
                     SlideFadeRoute(page: const AboutScreen()),
                   );
                 },
-              ),
+              ).animate().fadeIn().slideX(begin: -0.1), // Animate item individually
               const SizedBox(height: 30),
-              _buildSectionTitle("Danger Zone"),
+              _buildSectionTitle("Danger Zone").animate().fadeIn().slideX(begin: -0.1), // Animate section individually
               ProfileMenuItem(
                 title: 'Logout',
                 icon: Icons.logout,
                 onTap: _logout,
                 isDestructive: true,
-              ),
-            ].animate(interval: 100.ms).fadeIn().slideX(begin: -0.1),
+              ).animate().fadeIn().slideX(begin: -0.1), // Animate item individually
+            ],
+            // *** MODIFICATION END: Removed interval animation wrapper ***
           );
         },
       ),
@@ -283,6 +287,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
             radius: 50,
             backgroundColor: const Color(0xFF2C5364),
             backgroundImage: backgroundImage,
+            // Handle potential errors loading network image
+            onBackgroundImageError: (_, __) {},
+            child: backgroundImage is AssetImage || userData.profileImageUrl == null || userData.profileImageUrl!.isEmpty
+                ? const Icon(Icons.person, size: 50, color: Colors.white70) // Placeholder Icon
+                : null,
           ),
         ),
         const SizedBox(height: 16),
@@ -318,7 +327,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
-              _buildInfoItem("Ward ID", userData.wardId),
+              _buildInfoItem("Ward ID", userData.wardId.isEmpty ? 'N/A' : userData.wardId), // Show N/A if wardId is empty
               _buildInfoItem("Status", userData.hasActiveConnection ? "Active" : "Inactive",
                   valueColor: userData.hasActiveConnection ? Colors.greenAccent : Colors.orangeAccent),
               _buildInfoItem("Member Since", DateFormat('MMM yyyy').format(userData.createdAt.toDate())),

@@ -1,10 +1,12 @@
 import 'dart:io';
 import 'package:firebase_storage/firebase_storage.dart';
-import 'package:image_picker/image_picker.dart';
+import 'package:image_picker/image_picker.dart'; // Corrected import path
 import 'package:path/path.dart' as p;
+import 'package:firebase_auth/firebase_auth.dart'; // Added missing import
 
 class StorageService {
   final FirebaseStorage _storage = FirebaseStorage.instance;
+  final FirebaseAuth _auth = FirebaseAuth.instance; // Added for convenience
 
   Future<String> _uploadFile(File file, String storagePath) async {
     try {
@@ -39,12 +41,30 @@ class StorageService {
 
   Future<String> uploadComplaintImage(XFile imageFile, String userId) async {
     final fileExtension = p.extension(imageFile.path);
+    // Keep user ID less guessable/enumerable in path
     final safeUserId = userId.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '_');
     final fileName = '${safeUserId}_${DateTime.now().millisecondsSinceEpoch}$fileExtension';
-    final storagePath = 'complaint_images/$fileName';
+    // *** Updated path to match storage rules ***
+    final storagePath = 'complaint_images/citizen/$fileName';
 
     return _uploadFile(File(imageFile.path), storagePath);
   }
+
+  // *** NEW FUNCTION for Supervisor Complaint Images ***
+  Future<String> uploadSupervisorComplaintImage(XFile imageFile, String complaintId, String status) async {
+    final fileExtension = p.extension(imageFile.path);
+    final supervisorId = _auth.currentUser?.uid ?? 'unknown_supervisor'; // Used _auth
+    // Use complaint ID and status for organization
+    final safeComplaintId = complaintId.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '_');
+    final safeStatus = status.replaceAll(' ', '_').toLowerCase(); // e.g., in_progress, resolved
+    final fileName = '${safeComplaintId}_${safeStatus}_${supervisorId.substring(0,5)}_${DateTime.now().millisecondsSinceEpoch}$fileExtension';
+    // *** Updated path to match storage rules ***
+    final storagePath = 'complaint_images/supervisor_updates/$fileName';
+
+    return _uploadFile(File(imageFile.path), storagePath);
+  }
+  // *** END NEW FUNCTION ***
+
 
   Future<String> uploadResidentialProof(File file, String userId) async {
     final fileExtension = p.extension(file.path);
@@ -64,7 +84,6 @@ class StorageService {
     return _uploadFile(File(imageFile.path), storagePath);
   }
 
-  // ✅ NEW FUNCTION: To upload user profile pictures.
   Future<String> uploadProfilePicture(XFile imageFile, String userId) async {
     final fileExtension = p.extension(imageFile.path);
     final safeUserId = userId.replaceAll(RegExp(r'[^a-zA-Z0-9]'), '_');

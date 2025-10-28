@@ -7,10 +7,10 @@ import 'package:aquasense/screens/connections/apply_connection_screen.dart';
 import 'package:aquasense/screens/connections/connection_status_detail_screen.dart';
 import 'package:aquasense/screens/home/components/apply_connection_card.dart';
 import 'package:aquasense/screens/home/components/connection_status_card.dart';
-import 'package:aquasense/screens/home/components/prediction_card.dart'; // Import the new card
-import 'package:aquasense/screens/report/report_leak_screen.dart';
-import 'package:aquasense/screens/statistics/usage_statistics_screen.dart';
-import 'package:aquasense/services/ml_service.dart'; // Import the new service
+import 'package:aquasense/screens/home/components/prediction_card.dart'; // Import the card
+import 'package:aquasense/services/ml_service.dart'; // Import ML Service for the enum
+import 'package:aquasense/models/billing_info.dart'; // Import BillingInfo
+import 'package:aquasense/services/firestore_service.dart'; // Import FirestoreService
 import 'package:aquasense/utils/page_transition.dart';
 import 'package:aquasense/widgets/animated_water_tank.dart';
 import 'package:flutter/material.dart';
@@ -25,6 +25,11 @@ import 'package:url_launcher/url_launcher.dart';
 import 'dart:async'; // Import async for StreamSubscription
 import 'package:flutter/foundation.dart'; // Import for debugPrint
 
+// --- Import the missing screen files ---
+import 'package:aquasense/screens/report/report_leak_screen.dart'; // <-- MAKE SURE THIS IMPORT IS HERE
+import 'package:aquasense/screens/statistics/usage_statistics_screen.dart';
+// --- End Imports ---
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -34,172 +39,253 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> {
   final AuthService _authService = AuthService();
-  final MLService _mlService = MLService(); // Add ML service instance
+  // final MLService _mlService = MLService(); // Temporarily removed for client-side calculation
+  final FirestoreService _firestoreService = FirestoreService(); // Added for billing history
   final User? currentUser = FirebaseAuth.instance.currentUser;
   late Stream<UserData?> _userDataStream;
-  Future<ConsumptionCategory?>? _predictionFuture; // To hold the prediction result
+  ConsumptionCategory? _clientSidePredictionResult; // State for client-side result
+  StreamSubscription? _billingHistorySubscription; // Subscription for billing data
 
   // --- State for Announcement Indicator ---
   bool _hasNewAnnouncements = false;
-  StreamSubscription? _newAnnouncementsSubscription; // Renamed for clarity
+  StreamSubscription? _newAnnouncementsSubscription;
   Timestamp? _lastReadTimestamp;
   UserData? _citizenData; // Store citizen data
-  StreamSubscription? _userDataSubscription; // Renamed for clarity
+  StreamSubscription? _userDataSubscription;
 
 
   @override
   void initState() {
     super.initState();
-    // Start listening for user data changes immediately
+    debugPrint("HomeScreen: initState called.");
     _setupUserDataListener();
-    // Use the listener stream as the primary source for the FutureBuilder
-    _userDataStream = _userDataListenerStream(); // Helper to create the stream
-    // Trigger an initial fetch as well for faster first load
+    _userDataStream = _userDataListenerStream();
     _fetchInitialCitizenData();
+    // Setup listener for billing history to calculate prediction
+    _setupBillingHistoryListener();
   }
 
-  // --- NEW: Helper to create the user data stream ---
   Stream<UserData?> _userDataListenerStream() {
+    // Keep existing user data listener logic
     if (currentUser == null) return Stream.value(null);
+    debugPrint("HomeScreen: Creating user data listener stream for ${currentUser!.uid}");
     return FirebaseFirestore.instance
         .collection('users')
         .doc(currentUser!.uid)
         .snapshots()
-        .map((doc) => doc.exists ? UserData.fromFirestore(doc) : null)
+        .map((doc) {
+      debugPrint("HomeScreen: User data stream received snapshot. Exists: ${doc.exists}");
+      return doc.exists ? UserData.fromFirestore(doc) : null;
+    })
         .handleError((error) {
-      // --- DEBUG PRINT ADDED ---
       debugPrint("HomeScreen: Error listening to user data stream: $error");
-      // -------------------------
-      return null; // Propagate null on error
+      return null;
     });
   }
-  // --- END NEW HELPER ---
 
-
-  // Fetch initial data for faster loading
   Future<void> _fetchInitialCitizenData() async {
+    // Keep existing initial fetch logic, but remove prediction trigger call
     if (currentUser == null) return;
-    // --- DEBUG PRINT ADDED ---
     debugPrint("HomeScreen: Fetching initial citizen data for ${currentUser!.uid}");
-    // -------------------------
     try {
       final doc = await FirebaseFirestore.instance.collection('users').doc(currentUser!.uid).get();
       if (doc.exists && mounted) {
         final initialData = UserData.fromFirestore(doc);
-        // --- DEBUG PRINT ADDED ---
-        debugPrint("HomeScreen: Initial citizen data fetched: Name - ${initialData.name}, Ward - ${initialData.wardId}, ActiveConn - ${initialData.hasActiveConnection}");
-        // -------------------------
-        // Only update if _citizenData is still null (listener might be faster)
+        debugPrint("HomeScreen: Initial citizen data fetched: Name - ${initialData.name}, Ward - ${initialData.wardId}, ActiveConn - ${initialData.hasActiveConnection}, LastRead: ${initialData.lastReadAnnouncementsTimestamp?.toDate()}");
+
         if (_citizenData == null) {
-          // --- DEBUG PRINT ADDED ---
-          debugPrint("HomeScreen: Setting initial _citizenData");
-          // -------------------------
+          debugPrint("HomeScreen: Setting initial _citizenData and triggering initial checks.");
           _citizenData = initialData;
           _lastReadTimestamp = initialData.lastReadAnnouncementsTimestamp;
-          _setupNewAnnouncementsCheck(); // *** CHANGED: Use check function ***
-          _triggerPredictionIfNeeded(initialData); // Trigger prediction
-          setState(() {}); // Update UI if needed
+          _setupNewAnnouncementsCheck();
+          setState(() {}); // Update UI with initial user data
         } else {
-          // --- DEBUG PRINT ADDED ---
           debugPrint("HomeScreen: _citizenData already set by listener, skipping initial data set.");
-          // -------------------------
         }
       } else if (mounted) {
-        // --- DEBUG PRINT ADDED ---
         debugPrint("HomeScreen: Initial citizen data fetch - Document does not exist.");
-        // -------------------------
       }
     } catch (e) {
-      // --- DEBUG PRINT ADDED ---
       debugPrint("HomeScreen: Error fetching initial citizen data: $e");
-      // -------------------------
     }
   }
 
-
-  // Listen for real-time updates to user data (like lastRead timestamp)
   void _setupUserDataListener() {
+    // Keep existing user data listener logic, but modify prediction handling
     if (currentUser == null) return;
-    // --- DEBUG PRINT ADDED ---
     debugPrint("HomeScreen: Setting up user data listener for ${currentUser!.uid}");
-    // -------------------------
-    // Use the helper stream
     _userDataSubscription = _userDataListenerStream().listen((userData) {
-      // --- DEBUG PRINT ADDED ---
       debugPrint("HomeScreen: User data listener received update. UserData is null: ${userData == null}");
-      // -------------------------
       if (userData != null && mounted) {
-        // --- DEBUG PRINT ADDED ---
-        // debugPrint("HomeScreen: Listener update - User: ${userData.name}, Ward: ${userData.wardId}, ActiveConn: ${userData.hasActiveConnection}, LastRead: ${userData.lastReadAnnouncementsTimestamp?.toDate()}");
-        // -------------------------
+        debugPrint("HomeScreen: Listener update - User: ${userData.name}, Ward: ${userData.wardId}, ActiveConn: ${userData.hasActiveConnection}, LastRead: ${userData.lastReadAnnouncementsTimestamp?.toDate()}");
         bool needsRebuild = false;
-        bool timestampChanged = false; // Flag to check timestamp change
+        bool timestampChanged = false;
+        bool connectionStatusChanged = (_citizenData?.hasActiveConnection ?? false) != userData.hasActiveConnection;
 
-        // Check if citizen data actually changed (to avoid unnecessary rebuilds)
-        if (_citizenData == null ||
-            _citizenData!.uid != userData.uid ||
-            _citizenData!.name != userData.name ||
-            _citizenData!.hasActiveConnection != userData.hasActiveConnection || // Check connection status change
-            _citizenData!.wardId != userData.wardId // Check ward change
-        /* add other relevant fields */)
-        {
-          // --- DEBUG PRINT ADDED ---
-          debugPrint("HomeScreen: Core user data changed, updating _citizenData and flagging for rebuild.");
-          // -------------------------
-          _citizenData = userData;
-          needsRebuild = true;
-        }
 
-        // Update last read timestamp and re-setup stream if it changed
+        // Update citizen data
+        _citizenData = userData; // Always update _citizenData with the latest
+        needsRebuild = true; // Assume rebuild needed, simplify logic
+
+        // Handle timestamp changes
         final newTimestamp = userData.lastReadAnnouncementsTimestamp;
-        // --- FIX: Use direct comparison for Timestamps ---
         if (_lastReadTimestamp != newTimestamp) {
-          // ---------------------------------------------
-          // --- DEBUG PRINT ADDED ---
-          debugPrint("HomeScreen: lastReadAnnouncementsTimestamp changed. Old: ${_lastReadTimestamp?.toDate()}, New: ${newTimestamp?.toDate()}. Will re-check announcements.");
-          // -------------------------
+          debugPrint("HomeScreen: lastReadAnnouncementsTimestamp changed.");
           _lastReadTimestamp = newTimestamp;
-          timestampChanged = true; // Set flag
+          timestampChanged = true;
         }
 
+        // --- PREDICTION LOGIC (Client-Side Trigger) ---
+        if (connectionStatusChanged) {
+          debugPrint("HomeScreen: Connection status changed to ${userData.hasActiveConnection}.");
+          if (userData.hasActiveConnection) {
+            // If connection became active, ensure billing listener is set up
+            _setupBillingHistoryListener(); // Re-setup or start listening
+          } else {
+            // If connection became inactive, clear prediction
+            if (mounted) {
+              setState(() {
+                _clientSidePredictionResult = null;
+                _billingHistorySubscription?.cancel(); // Stop listening to bills
+                _billingHistorySubscription = null;
+              });
+            }
+          }
+        } else if (userData.hasActiveConnection && _billingHistorySubscription == null) {
+          // If somehow listener isn't active but connection is, start it
+          _setupBillingHistoryListener();
+        }
+        // --- END PREDICTION LOGIC ---
 
-        // Trigger prediction if needed (e.g., connection status changed)
-        _triggerPredictionIfNeeded(userData); // Pass the LATEST userData
-
-        // Re-check for new announcements if timestamp changed
         if (timestampChanged) {
-          _setupNewAnnouncementsCheck(); // *** CHANGED: Use check function ***
+          _setupNewAnnouncementsCheck();
         }
 
-        if (needsRebuild && mounted) { // Double check mounted
-          // --- DEBUG PRINT ADDED ---
-          debugPrint("HomeScreen: Calling setState due to core user data change.");
-          // -------------------------
-          setState(() {}); // Trigger rebuild if core user data changed
+        if (needsRebuild && mounted) {
+          debugPrint("HomeScreen: Calling setState due to data/timestamp change.");
+          setState(() {});
+        } else if (mounted) {
+          debugPrint("HomeScreen: No significant state change detected in user listener, skipping setState.");
         }
+
       } else if (mounted) {
-        // Handle case where user doc might be deleted while listening
-        // --- DEBUG PRINT ADDED ---
-        debugPrint("HomeScreen: User data listener received null data, setting _citizenData to null and calling setState.");
-        // -------------------------
+        debugPrint("HomeScreen: User data listener received null data.");
         _citizenData = null;
-        setState(() {}); // Trigger rebuild to show error/logout state
+        _billingHistorySubscription?.cancel(); // Stop listening if user logs out/deleted
+        _billingHistorySubscription = null;
+        setState(() {});
       }
-    }, onError: (error) { // Add onError handling
-      // --- DEBUG PRINT ADDED ---
+    }, onError: (error) {
       debugPrint("HomeScreen: Error in user data listener stream: $error");
-      // -------------------------
-      // Optionally handle the error, maybe show a message or attempt retry
       if (mounted) {
-        _citizenData = null; // Assume data is invalid on error
+        _citizenData = null;
+        _billingHistorySubscription?.cancel();
+        _billingHistorySubscription = null;
         setState(() {});
       }
     });
   }
 
-  // *** NEW FUNCTION: Check for new announcements without using whereIn ***
+  // --- NEW: Listener for Billing History ---
+  void _setupBillingHistoryListener() {
+    // If user has no active connection, or listener already exists, do nothing
+    if (_citizenData == null || !_citizenData!.hasActiveConnection || _billingHistorySubscription != null) {
+      debugPrint("HomeScreen: Skipping billing history listener setup. Active: ${_citizenData?.hasActiveConnection}, SubExists: ${_billingHistorySubscription != null}");
+      // If connection is inactive, ensure prediction is cleared
+      if (_citizenData != null && !_citizenData!.hasActiveConnection && _clientSidePredictionResult != null) {
+        if (mounted) {
+          setState(() => _clientSidePredictionResult = null);
+        }
+      }
+      return;
+    }
+
+    debugPrint("HomeScreen: Setting up billing history listener for user ${currentUser!.uid}");
+    _billingHistorySubscription = _firestoreService.getBillingHistoryStream().listen(
+            (billingHistory) {
+          debugPrint("HomeScreen: Received billing history update. Count: ${billingHistory.length}");
+          _calculateClientSidePrediction(billingHistory);
+        },
+        onError: (error) {
+          debugPrint("HomeScreen: Error listening to billing history: $error");
+          if (mounted) {
+            setState(() => _clientSidePredictionResult = null); // Clear prediction on error
+          }
+        }
+    );
+  }
+
+  // --- NEW: Client-Side Prediction Calculation ---
+  void _calculateClientSidePrediction(List<BillingInfo> history) {
+    if (history.length < 2) {
+      debugPrint("HomeScreen: Not enough billing history (<2) to calculate prediction.");
+      if (mounted && _clientSidePredictionResult != null) {
+        setState(() => _clientSidePredictionResult = null); // Clear if not enough data
+      }
+      return; // Need at least two readings to calculate consumption
+    }
+
+    // Sort history oldest to newest to calculate consumption correctly
+    final sortedHistory = List<BillingInfo>.from(history)..sort((a, b) => a.date.compareTo(b.date));
+
+    // Calculate average *monthly* consumption over the last few periods (e.g., up to 6)
+    double totalConsumption = 0;
+    int monthsCount = 0;
+    int limit = 6; // Look at last 6 months max
+
+    for (int i = sortedHistory.length - 1; i > 0 && monthsCount < limit; i--) {
+      // Basic check for roughly monthly interval (can be refined)
+      final daysDiff = sortedHistory[i].date.toDate().difference(sortedHistory[i-1].date.toDate()).inDays;
+      if (daysDiff > 20 && daysDiff < 40) {
+        final consumption = sortedHistory[i].reading - sortedHistory[i - 1].reading;
+        if (consumption >= 0) { // Ignore potential negative readings from corrections
+          totalConsumption += consumption;
+          monthsCount++;
+        }
+      }
+    }
+
+    if (monthsCount == 0) {
+      debugPrint("HomeScreen: No valid monthly intervals found in billing history.");
+      if (mounted && _clientSidePredictionResult != null) {
+        setState(() => _clientSidePredictionResult = null);
+      }
+      return;
+    }
+
+    final averageConsumption = totalConsumption / monthsCount;
+    debugPrint("HomeScreen: Calculated average monthly consumption: ${averageConsumption.toStringAsFixed(1)} units over $monthsCount months.");
+
+    // Apply thresholds (same as Cloud Function for consistency)
+    final ConsumptionCategory predictedCategory;
+    const EFFICIENT_THRESHOLD = 10.0;
+    const AVERAGE_THRESHOLD = 25.0;
+    const HIGH_THRESHOLD = 40.0;
+
+    if (averageConsumption <= EFFICIENT_THRESHOLD) {
+      predictedCategory = ConsumptionCategory.efficient;
+    } else if (averageConsumption <= AVERAGE_THRESHOLD) {
+      predictedCategory = ConsumptionCategory.average;
+    } else if (averageConsumption <= HIGH_THRESHOLD) {
+      predictedCategory = ConsumptionCategory.high;
+    } else {
+      predictedCategory = ConsumptionCategory.veryHigh;
+    }
+    debugPrint("HomeScreen: Client-side predicted category: $predictedCategory");
+
+
+    // Update state if prediction changed
+    if (mounted && _clientSidePredictionResult != predictedCategory) {
+      setState(() {
+        _clientSidePredictionResult = predictedCategory;
+      });
+    }
+  }
+
+
   Future<void> _setupNewAnnouncementsCheck() async {
-    _newAnnouncementsSubscription?.cancel(); // Cancel any previous check listener
+    // Keep existing announcement check logic
+    _newAnnouncementsSubscription?.cancel();
 
     if (_citizenData == null) {
       debugPrint("HomeScreen: Cannot check announcements, _citizenData is null.");
@@ -208,50 +294,41 @@ class _HomeScreenState extends State<HomeScreen> {
     debugPrint("HomeScreen: Checking for new announcements. WardId: ${_citizenData!.wardId}, LastRead: ${_lastReadTimestamp?.toDate()}");
 
     bool foundNew = false;
-
     try {
-      // 1. Check for new GLOBAL announcements
       Query globalQuery = FirebaseFirestore.instance
           .collection('announcements')
-          .where('wardId', isEqualTo: null) // Global
+          .where('wardId', isEqualTo: null)
           .orderBy('createdAt', descending: true)
-          .limit(1); // Get only the latest
-
+          .limit(1);
       if (_lastReadTimestamp != null) {
         globalQuery = globalQuery.where('createdAt', isGreaterThan: _lastReadTimestamp!);
       }
-
       final globalSnapshot = await globalQuery.get();
       if (globalSnapshot.docs.isNotEmpty) {
         debugPrint("HomeScreen: Found new global announcement.");
         foundNew = true;
       }
 
-      // 2. Check for new WARD-SPECIFIC announcements (if not found globally and user has wardId)
       if (!foundNew && _citizenData!.wardId.isNotEmpty) {
         Query wardQuery = FirebaseFirestore.instance
             .collection('announcements')
-            .where('wardId', isEqualTo: _citizenData!.wardId) // Ward specific
+            .where('wardId', isEqualTo: _citizenData!.wardId)
             .orderBy('createdAt', descending: true)
-            .limit(1); // Get only the latest
-
+            .limit(1);
         if (_lastReadTimestamp != null) {
           wardQuery = wardQuery.where('createdAt', isGreaterThan: _lastReadTimestamp!);
         }
-
         final wardSnapshot = await wardQuery.get();
         if (wardSnapshot.docs.isNotEmpty) {
           debugPrint("HomeScreen: Found new ward announcement.");
           foundNew = true;
         }
       }
-
     } catch (e) {
       debugPrint("HomeScreen: Error checking for new announcements: $e");
-      foundNew = false; // Assume no new ones on error
+      foundNew = false;
     }
 
-    // Update state only if it changed and component is still mounted
     if (mounted && _hasNewAnnouncements != foundNew) {
       debugPrint("HomeScreen: Announcement indicator state changed to $foundNew. Calling setState.");
       setState(() {
@@ -260,80 +337,23 @@ class _HomeScreenState extends State<HomeScreen> {
     } else if (mounted) {
       debugPrint("HomeScreen: Announcement indicator state remains $_hasNewAnnouncements.");
     }
-
-    // Optionally: Set up a periodic timer to re-run this check if needed,
-    // or rely on the _userDataListener to trigger it when _lastReadTimestamp changes.
-    // For simplicity, we rely on the listener for now.
   }
-  // *** END NEW FUNCTION ***
 
-
-  // --- REMOVED OLD _listenForAnnouncements function ---
 
   @override
   void dispose() {
-    // --- DEBUG PRINT ADDED ---
     debugPrint("HomeScreen: Disposing HomeScreen state.");
-    // -------------------------
-    _newAnnouncementsSubscription?.cancel(); // Cancel listener (though not actively used now)
-    _userDataSubscription?.cancel(); // Cancel user data listener
+    _newAnnouncementsSubscription?.cancel();
+    _userDataSubscription?.cancel();
+    _billingHistorySubscription?.cancel(); // Dispose billing listener
     super.dispose();
   }
 
 
-  // Helper to trigger prediction
-  void _triggerPredictionIfNeeded(UserData userData) {
-    // --- DEBUG PRINT ADDED ---
-    // Check if prediction should run
-    if (userData.hasActiveConnection && _predictionFuture == null) {
-      debugPrint("HomeScreen: Triggering prediction for user ${userData.uid} in ward ${userData.wardId}. HasActiveConnection: ${userData.hasActiveConnection}");
-      if(mounted){
-        // Wrap in setState because _predictionFuture is used in the build method
-        setState(() {
-          _predictionFuture = _mlService.predictConsumptionCategory(
-            wardId: userData.wardId,
-            userId: userData.uid,
-          ).then((result) {
-            // --- DEBUG PRINT ADDED ---
-            debugPrint("HomeScreen: Prediction future completed inside .then(). Result: $result");
-            // We need another setState *here* if the future completes *after* the initial build triggered by the first setState.
-            if (mounted) {
-              // Check if the state needs update *after* the future completes
-              // This ensures the UI reflects the result if it wasn't ready during initial build
-              setState(() {});
-            }
-            // -------------------------
-            return result; // Return the result for the FutureBuilder
-          }).catchError((error) {
-            // --- DEBUG PRINT ADDED ---
-            debugPrint("HomeScreen: Prediction future failed with error inside .catchError(): $error");
-            if (mounted) {
-              setState(() {}); // Rebuild to potentially remove loading indicator
-            }
-            // -------------------------
-            return null; // Return null on error
-          });
-        });
-      }
-    } else if (!userData.hasActiveConnection && _predictionFuture != null) {
-      debugPrint("HomeScreen: Resetting prediction future because user ${userData.uid} connection is inactive.");
-      // Reset future if connection becomes inactive
-      if(mounted){
-        setState(() {
-          _predictionFuture = null;
-        });
-      }
-    } else if (userData.hasActiveConnection && _predictionFuture != null) {
-      // Optional: Log if prediction is already in progress or complete
-      debugPrint("HomeScreen: Prediction future already exists or is in progress for user ${userData.uid}.");
-    } else if (!userData.hasActiveConnection && _predictionFuture == null) {
-      debugPrint("HomeScreen: Prediction not triggered, user ${userData.uid} has no active connection.");
-    }
-    // --- END DEBUG PRINT ---
-  }
 
 
   Stream<ConnectionRequest?> getConnectionRequestStream() {
+    // Keep existing connection request stream logic
     if (currentUser == null) {
       return Stream.value(null);
     }
@@ -351,6 +371,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _showFeatureDisabledDialog(BuildContext context) {
+    // Keep existing dialog logic
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -372,18 +393,16 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _showSupervisorContactDialog(BuildContext context, String wardId) async {
+    // Keep existing dialog logic
     final scaffoldMessenger = ScaffoldMessenger.of(context);
     UserData? supervisor;
-
     try {
-      // Correct query: Look in 'users' collection with role 'supervisor' and matching wardId
       final supervisorQuery = await FirebaseFirestore.instance
           .collection('users')
           .where('wardId', isEqualTo: wardId)
-          .where('role', isEqualTo: 'supervisor') // Added role filter
+          .where('role', isEqualTo: 'supervisor')
           .limit(1)
           .get();
-
       if (supervisorQuery.docs.isNotEmpty) {
         supervisor = UserData.fromFirestore(supervisorQuery.docs.first);
       }
@@ -392,9 +411,7 @@ class _HomeScreenState extends State<HomeScreen> {
       scaffoldMessenger.showSnackBar(SnackBar(content: Text("Error finding supervisor: $e")));
       return;
     }
-
     if (!context.mounted) return;
-
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -448,21 +465,15 @@ class _HomeScreenState extends State<HomeScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       body: StreamBuilder<UserData?>(
-        stream: _userDataStream, // Use the listener stream
+        stream: _userDataStream,
         builder: (context, userSnapshot) {
-          // Show loading if listener hasn't provided data yet AND initial fetch hasn't completed
+          // Keep existing loading/error handling for user data
           if (userSnapshot.connectionState == ConnectionState.waiting && _citizenData == null) {
-            // --- DEBUG PRINT ADDED ---
             debugPrint("HomeScreen Build: User Stream waiting, _citizenData is null -> Showing Loading");
-            // -------------------------
             return const Center(child: CircularProgressIndicator());
           }
-
-          // Handle error or logout state if stream provides null or has error, AND initial fetch failed/returned null
           if ((userSnapshot.hasError || !userSnapshot.hasData || userSnapshot.data == null) && _citizenData == null) {
-            // --- DEBUG PRINT ADDED ---
-            debugPrint("HomeScreen Build: User Stream error/no data AND _citizenData is null -> Showing Error/Logout. HasError: ${userSnapshot.hasError}, HasData: ${userSnapshot.hasData}");
-            // -------------------------
+            debugPrint("HomeScreen Build: User Stream error/no data AND _citizenData is null -> Showing Error/Logout.");
             return Center(
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
@@ -477,22 +488,16 @@ class _HomeScreenState extends State<HomeScreen> {
             );
           }
 
-          // Use the latest available citizen data (_citizenData is updated by listener or initial fetch)
-          // Ensure _citizenData is not null before proceeding
           final userData = _citizenData;
           if (userData == null) {
-            // --- DEBUG PRINT ADDED ---
-            debugPrint("HomeScreen Build: userData (_citizenData) is null after checks -> Showing Error. This shouldn't normally happen.");
-            // -------------------------
-            // This case should ideally be handled by the error/loading logic above
-            return const Center(child: Text('User data not available.', style: TextStyle(color: Colors.orangeAccent)));
+            debugPrint("HomeScreen Build: userData (_citizenData) is null after checks -> Showing Error.");
+            return const Center(child: CircularProgressIndicator()); // Fallback loading
           }
-          // --- DEBUG PRINT ADDED ---
-          // debugPrint("HomeScreen Build: Building UI for user ${userData.uid}, ActiveConnection: ${userData.hasActiveConnection}");
-          // -------------------------
+          debugPrint("HomeScreen Build: Building UI for user ${userData.uid}, ActiveConnection: ${userData.hasActiveConnection}");
 
-
+          // --- UI Code ---
           return Container(
+            // Keep existing Container decoration (gradient)
             decoration: const BoxDecoration(
               gradient: LinearGradient(
                 colors: [Color(0xFF0F2027), Color(0xFF203A43), Color(0xFF2C5364)],
@@ -502,26 +507,17 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             child: CustomScrollView(
               slivers: [
-                // --- Pass indicator status to HomeHeader ---
                 HomeHeader(
                   userName: userData.name,
-                  hasNewAnnouncements: _hasNewAnnouncements, // Pass the flag
+                  hasNewAnnouncements: _hasNewAnnouncements,
                   onNotificationTap: () {
-                    // --- DEBUG PRINT ADDED ---
-                    debugPrint("HomeScreen: Tapped notification icon. Navigating to AnnouncementsScreen.");
-                    // -------------------------
                     Navigator.of(context).push(
-                        MaterialPageRoute(builder: (_) => AnnouncementsScreen(userData: userData)) // Pass user data
+                        MaterialPageRoute(builder: (_) => AnnouncementsScreen(userData: userData))
                     ).then((_) {
-                      // Trigger a manual check/reset after returning
-                      // --- DEBUG PRINT ADDED ---
-                      debugPrint("HomeScreen: Returned from announcements screen. Re-checking announcements.");
-                      // -------------------------
-                      _setupNewAnnouncementsCheck(); // *** CHANGED: Use check function ***
+                      _setupNewAnnouncementsCheck();
                     });
                   },
                 ),
-                // --- End Header Update ---
 
                 if (userData.hasActiveConnection)
                   _buildWaterTankDisplay(userData.wardId)
@@ -558,60 +554,26 @@ class _HomeScreenState extends State<HomeScreen> {
                     }
                 ),
 
-                // --- DEBUG PRINT ADDED around FutureBuilder ---
+                // --- Updated Prediction Section ---
                 SliverToBoxAdapter(
-                  child: Builder( // Use Builder to access context for debug print
+                  child: Builder(
                       builder: (context) {
-                        // --- DEBUG PRINT ADDED ---
-                        debugPrint("HomeScreen Build: Checking Prediction FutureBuilder conditions. hasActiveConnection: ${userData.hasActiveConnection}, _predictionFuture is null: ${_predictionFuture == null}");
-                        // -------------------------
-                        if (userData.hasActiveConnection && _predictionFuture != null) {
-                          // --- DEBUG PRINT ADDED ---
-                          debugPrint("HomeScreen Build: Rendering Prediction FutureBuilder.");
-                          // -------------------------
-                          return FutureBuilder<ConsumptionCategory?>(
-                            future: _predictionFuture,
-                            builder: (context, predictionSnapshot) {
-                              // --- DEBUG PRINT ADDED ---
-                              debugPrint("HomeScreen Build: Prediction FutureBuilder state: ${predictionSnapshot.connectionState}, hasData: ${predictionSnapshot.hasData}, data: ${predictionSnapshot.data}, hasError: ${predictionSnapshot.hasError}");
-                              // -------------------------
-                              if (predictionSnapshot.connectionState == ConnectionState.waiting) {
-                                // --- DEBUG PRINT ADDED ---
-                                debugPrint("HomeScreen Build: Prediction Future is waiting.");
-                                // -------------------------
-                                // Optional: Show a shimmer or placeholder while predicting
-                                return const SizedBox(height: 100, child: Center(child: CircularProgressIndicator(strokeWidth: 2))); // Example placeholder
-                              }
-                              if (predictionSnapshot.hasError) {
-                                // --- DEBUG PRINT ADDED ---
-                                debugPrint("HomeScreen Build: Prediction Future failed with error: ${predictionSnapshot.error}");
-                                // -------------------------
-                                return const SizedBox.shrink(); // Don't show card on error
-                              }
-                              if (predictionSnapshot.hasData && predictionSnapshot.data != null) {
-                                // --- DEBUG PRINT ADDED ---
-                                debugPrint("HomeScreen Build: Prediction Future completed with data: ${predictionSnapshot.data}. Showing PredictionCard.");
-                                // -------------------------
-                                return PredictionCard(category: predictionSnapshot.data!);
-                              }
-                              // Don't show anything if no prediction or error
-                              // --- DEBUG PRINT ADDED ---
-                              debugPrint("HomeScreen Build: Prediction Future completed but hasData is false or data is null. Hiding card.");
-                              // -------------------------
-                              return const SizedBox.shrink();
-                            },
-                          );
-                        } else {
-                          // --- DEBUG PRINT ADDED ---
-                          debugPrint("HomeScreen Build: Condition for Prediction FutureBuilder not met. Skipping.");
-                          // -------------------------
-                          return const SizedBox.shrink(); // Return empty if condition isn't met
+                        debugPrint("HomeScreen Build: Rendering Prediction Section. Active: ${userData.hasActiveConnection}, ClientResult: $_clientSidePredictionResult");
+                        // Show the card *only* if connection is active AND the client-side result is available
+                        if (userData.hasActiveConnection && _clientSidePredictionResult != null) {
+                          debugPrint("HomeScreen Build: Showing PredictionCard with client result: $_clientSidePredictionResult");
+                          // Use the imported ConsumptionCategory from ml_service.dart
+                          return PredictionCard(category: _clientSidePredictionResult!);
+                        }
+                        // Otherwise, show nothing (no loading indicator needed for client-side calc)
+                        else {
+                          debugPrint("HomeScreen Build: Hiding Prediction Section.");
+                          return const SizedBox.shrink();
                         }
                       }
                   ),
                 ),
-                // --- END DEBUG PRINT ---
-
+                // --- End Updated Prediction Section ---
 
                 StreamBuilder<ConnectionRequest?>(
                     stream: getConnectionRequestStream(),
@@ -642,28 +604,27 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildWaterTankDisplay(String wardId) {
+    // Keep existing water tank display logic
+    if (wardId.isEmpty) {
+      debugPrint("HomeScreen: Skipping WaterTankDisplay, wardId is empty.");
+      return const SliverToBoxAdapter(child: SizedBox.shrink());
+    }
+    debugPrint("HomeScreen: Building WaterTankDisplay for ward: $wardId");
     return SliverPadding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
       sliver: SliverToBoxAdapter(
         child: StreamBuilder<DocumentSnapshot>(
           stream: FirebaseFirestore.instance.collection('water_tanks').doc(wardId).snapshots(),
           builder: (context, snapshot) {
-            if (snapshot.connectionState == ConnectionState.waiting) {
-              return const SizedBox(height: 190, child: Center(child: CircularProgressIndicator()));
-            }
+            // ... existing tank builder logic ...
+            if (snapshot.connectionState == ConnectionState.waiting) { return const SizedBox(height: 190, child: Center(child: CircularProgressIndicator())); }
             if (!snapshot.hasData || !snapshot.data!.exists) {
-              return const SizedBox.shrink(); // Hide if no tank data
+              debugPrint("HomeScreen: No water tank data found for ward: $wardId");
+              return const SizedBox.shrink();
             }
-
             final tank = WaterTank.fromFirestore(snapshot.data!);
-
-            return SizedBox(
-              height: 190, // Ensure fixed height for layout
-              child: AnimatedWaterTank(
-                waterLevel: tank.level,
-                tankName: tank.tankName,
-              ),
-            );
+            debugPrint("HomeScreen: Water tank data loaded for ward $wardId: Level ${tank.level}%");
+            return SizedBox( height: 190, child: AnimatedWaterTank( waterLevel: tank.level, tankName: tank.tankName, ), );
           },
         ),
       ),
@@ -671,6 +632,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildNoConnectionMessage() {
+    // Keep existing no connection message
     return SliverPadding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
       sliver: SliverToBoxAdapter(
@@ -702,6 +664,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Widget _buildQuickActions(UserData userData) {
+    // Keep existing quick actions grid
     return SliverPadding(
       padding: const EdgeInsets.all(24.0),
       sliver: SliverGrid(
@@ -721,12 +684,12 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
 
             QuickActionCard(
-              title: 'Report an\nIssue', // Updated text slightly
-              icon: Icons.report_problem_outlined, // Changed Icon
+              title: 'Report an\nIssue',
+              icon: Icons.report_problem_outlined,
               color: Colors.blueAccent,
               onTap: () {
                 Navigator.of(context)
-                    .push(SlideFadeRoute(page: const ReportLeakScreen()));
+                    .push(SlideFadeRoute(page: const ReportLeakScreen())); // This line had the error
               },
             ),
 
@@ -751,7 +714,7 @@ class _HomeScreenState extends State<HomeScreen> {
               onTap: () {
                 if (userData.hasActiveConnection) {
                   Navigator.of(context)
-                      .push(SlideFadeRoute(page: const UsageStatisticsScreen()));
+                      .push(SlideFadeRoute(page: const UsageStatisticsScreen())); // Use the imported class
                 } else {
                   _showFeatureDisabledDialog(context);
                 }
@@ -767,17 +730,18 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 }
 
-// --- UPDATED HomeHeader Class ---
+// --- Keep HomeHeader Class ---
 class HomeHeader extends StatelessWidget {
+  // ... existing HomeHeader code ...
   final String userName;
   final VoidCallback onNotificationTap;
-  final bool hasNewAnnouncements; // Add this
+  final bool hasNewAnnouncements;
 
   const HomeHeader({
     super.key,
     required this.userName,
     required this.onNotificationTap,
-    required this.hasNewAnnouncements, // Require it
+    required this.hasNewAnnouncements,
   });
 
   @override
@@ -809,20 +773,17 @@ class HomeHeader extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 16),
-            // --- Icon with Indicator ---
             IconButton(
               icon: Stack(
-                clipBehavior: Clip.none, // Allow dot to overflow
+                clipBehavior: Clip.none,
                 children: [
-                  // --- CHANGE ICON BACK TO BELL ---
                   const Icon(Icons.notifications_outlined, color: Colors.white, size: 30),
-                  // -------------------------------
                   if (hasNewAnnouncements)
                     Positioned(
-                      top: -4, // Adjust position as needed
-                      right: -4, // Adjust position as needed
+                      top: -4,
+                      right: -4,
                       child: Container(
-                        width: 10, // Size of the dot
+                        width: 10,
                         height: 10,
                         decoration: const BoxDecoration(
                           color: Colors.redAccent,
@@ -835,7 +796,6 @@ class HomeHeader extends StatelessWidget {
               tooltip: 'View Announcements',
               onPressed: onNotificationTap,
             ),
-            // --- End Icon Update ---
           ],
         ).animate().fadeIn(duration: 500.ms).slideX(begin: -0.2, curve: Curves.easeOut),
       ),

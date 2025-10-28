@@ -7,9 +7,14 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 
-class ComplaintStatusScreen extends StatelessWidget {
+class ComplaintStatusScreen extends StatefulWidget { // Changed to StatefulWidget
   const ComplaintStatusScreen({super.key});
 
+  @override
+  State<ComplaintStatusScreen> createState() => _ComplaintStatusScreenState();
+}
+
+class _ComplaintStatusScreenState extends State<ComplaintStatusScreen> { // Added State
   int _getStatusPriority(String status) {
     switch (status.toLowerCase()) {
       case 'submitted': return 0;
@@ -19,8 +24,8 @@ class ComplaintStatusScreen extends StatelessWidget {
     }
   }
 
-  // --- NEW DELETE FUNCTION ---
   Future<void> _deleteComplaint(BuildContext context, String complaintId) async {
+    // ... (keep existing _deleteComplaint logic) ...
     final scaffoldMessenger = ScaffoldMessenger.of(context);
 
     bool? confirmDelete = await showDialog(
@@ -48,14 +53,35 @@ class ComplaintStatusScreen extends StatelessWidget {
     if (confirmDelete == true) {
       try {
         await FirebaseFirestore.instance.collection('complaints').doc(complaintId).delete();
+        // Check mounted before showing snackbar
+        if (!mounted) return;
         scaffoldMessenger.showSnackBar(
           const SnackBar(content: Text('Complaint deleted successfully.')),
         );
       } catch (e) {
+        if (!mounted) return;
         scaffoldMessenger.showSnackBar(
           SnackBar(content: Text('Failed to delete complaint: $e')),
         );
       }
+    }
+  }
+
+  // --- NEW: Function to submit rating ---
+  Future<void> _submitRating(String complaintId, int rating) async {
+    final scaffoldMessenger = ScaffoldMessenger.of(context);
+    try {
+      await FirebaseFirestore.instance.collection('complaints').doc(complaintId).update({
+        'citizenRating': rating,
+      });
+      scaffoldMessenger.showSnackBar(
+        SnackBar(content: Text('Thank you for your feedback! Rating: $rating stars.'), backgroundColor: Colors.green),
+      );
+      // No need to call setState here, StreamBuilder will update the UI
+    } catch (e) {
+      scaffoldMessenger.showSnackBar(
+        SnackBar(content: Text('Failed to submit rating: $e'), backgroundColor: Colors.red),
+      );
     }
   }
 
@@ -83,16 +109,19 @@ class ComplaintStatusScreen extends StatelessWidget {
         child: CustomScrollView(
           slivers: [
             const SliverAppBar(
-              backgroundColor: Colors.transparent,
+              backgroundColor: Colors.transparent, // Make AppBar transparent
+              foregroundColor: Colors.white, // Ensure back button is visible
               title: Text('My Complaints'),
               pinned: true,
+              elevation: 0, // Remove shadow
+              centerTitle: true,
             ),
             SliverToBoxAdapter(
               child: StreamBuilder<QuerySnapshot>(
                 stream: FirebaseFirestore.instance
                     .collection('complaints')
                     .where('userId', isEqualTo: userId)
-                    .snapshots(),
+                    .snapshots(), // Listen for real-time updates
                 builder: (context, snapshot) {
                   if (snapshot.connectionState == ConnectionState.waiting) {
                     return const Center(child: Padding(padding: EdgeInsets.all(32.0), child: CircularProgressIndicator()));
@@ -108,6 +137,7 @@ class ComplaintStatusScreen extends StatelessWidget {
                       .map((doc) => Complaint.fromFirestore(doc))
                       .toList();
 
+                  // Sort based on priority and date
                   complaints.sort((a, b) {
                     final priorityA = _getStatusPriority(a.status);
                     final priorityB = _getStatusPriority(b.status);
@@ -124,21 +154,37 @@ class ComplaintStatusScreen extends StatelessWidget {
                     padding: const EdgeInsets.all(16),
                     itemBuilder: (context, index) {
                       final complaint = complaints[index];
-                      return GestureDetector(
-                        onTap: () {
-                          Navigator.of(context).push(SlideFadeRoute(
-                            page: ComplaintDetailScreenCitizen(complaint: complaint),
-                          ));
-                        },
-                        child: ComplaintListTile(
-                          complaint: complaint,
-                          // --- PASSING THE DELETE FUNCTION ---
-                          onDelete: () => _deleteComplaint(context, complaint.id!),
-                        )
-                            .animate()
-                            .fadeIn(delay: (100 * index).ms)
-                            .slideX(begin: -0.2),
-                      );
+                      bool isResolved = complaint.status.toLowerCase() == 'resolved';
+                      bool alreadyRated = complaint.citizenRating != null;
+
+                      return Column( // Wrap ListTile and Rating in a Column
+                        children: [
+                          GestureDetector(
+                            onTap: () {
+                              Navigator.of(context).push(SlideFadeRoute(
+                                // Navigate to citizen detail screen
+                                page: ComplaintDetailScreenCitizen(complaint: complaint),
+                              ));
+                            },
+                            child: ComplaintListTile(
+                              complaint: complaint,
+                              // Pass delete only if not resolved or allow deletion always? (Current: Allow always)
+                              onDelete: () => _deleteComplaint(context, complaint.id!),
+                              // Pass rating to display it in the tile
+                              rating: complaint.citizenRating,
+                            ),
+                          ),
+                          // --- Display Rating Widget Conditionally ---
+                          if (isResolved && !alreadyRated)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 0, bottom: 16.0, left: 16, right: 16), // Adjust padding
+                              child: _buildRatingWidget(complaint.id!),
+                            ),
+                          // You could add an "else if (isResolved && alreadyRated)" here to show static stars
+                        ],
+                      ).animate()
+                          .fadeIn(delay: (50 * index).ms) // Reduced delay
+                          .slideX(begin: -0.1);
                     },
                   );
                 },
@@ -149,4 +195,36 @@ class ComplaintStatusScreen extends StatelessWidget {
       ),
     );
   }
+
+  // --- NEW: Rating Widget Builder ---
+  Widget _buildRatingWidget(String complaintId) {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 12),
+      decoration: BoxDecoration(
+        color: Colors.black.withOpacity(0.2),
+        borderRadius: const BorderRadius.only(
+          bottomLeft: Radius.circular(15),
+          bottomRight: Radius.circular(15),
+        ),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const Text("Rate the service: ", style: TextStyle(color: Colors.white70, fontSize: 14)),
+          const SizedBox(width: 8),
+          ...List.generate(5, (index) {
+            return InkWell(
+              onTap: () => _submitRating(complaintId, index + 1),
+              child: Icon(
+                Icons.star_border, // Use border initially
+                color: Colors.amber,
+                size: 28, // Slightly larger stars
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
 }

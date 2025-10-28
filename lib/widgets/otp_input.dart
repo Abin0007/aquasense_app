@@ -18,7 +18,6 @@ class OtpInput extends StatelessWidget {
       width: 40,
       child: TextFormField(
         autofocus: autoFocus,
-        // ✅ FIX: Added textAlign to perfectly center the digit.
         textAlign: TextAlign.center,
         keyboardType: TextInputType.number,
         controller: controller,

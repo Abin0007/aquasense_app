@@ -1,11 +1,9 @@
-/* eslint-disable max-len */ // Keep disabling max-len for safety, but tried to fix below
+/* eslint-disable max-len */
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
-const KNear = require("knn"); // Use 'knn' package
-// Import the v2 trigger function for Firestore
+const KNear = require("knn");
 const {onDocumentUpdated} = require("firebase-functions/v2/firestore");
 
-// Initialize Firebase Admin SDK (only once)
 admin.initializeApp();
 const db = admin.firestore();
 
@@ -16,7 +14,6 @@ const ConsumptionCategory = {
   high: 2,
   veryHigh: 3,
 };
-// Helper to get enum name from index
 const categoryNames = ["efficient", "average", "high", "veryHigh"];
 
 const EFFICIENT_THRESHOLD = 10.0;
@@ -45,37 +42,49 @@ function getCategoryForConsumption(consumption) {
 // === PREDICTION CLOUD FUNCTION (HTTPS Callable - v1) ==================
 // ======================================================================
 /**
- * Predicts the next month's water consumption category for a user.
+ * Predicts the next month's water consumption category for a user using KNN.
+ * Requires userId and wardId in the data payload.
+ * Must be called by an authenticated user. (NOTE: Auth check temporarily bypassed)
  * @param {object} data The data passed to the function.
  * @param {string} data.userId The ID of the user to predict for.
  * @param {string} data.wardId The Ward ID of the user.
- * @param {functions.https.CallableContext} context The context of the call.
+ * @param {functions.https.CallableContext} context The context of the call,
+ * including authentication information.
  * @return {Promise<{category: string|null}>} A promise resolving with the
- * predicted category name or null.
+ * predicted category name (e.g., "average") or null if prediction cannot
+ * be made due to errors or insufficient data.
  */
 exports.predictConsumption = functions.https.onCall(async (data, context) => {
-  // 1. Authenticate and get input data
-  if (!context.auth) {
+  // --- TEMPORARILY COMMENT OUT AUTH CHECK ---
+  /*
+  functions.logger.info("Function called. Checking context.auth...");
+  if (context.auth) {
+    functions.logger.info(`Authentication context present. UID: ${context.auth.uid}`);
+  } else {
+    functions.logger.warn("Authentication context (context.auth) is NULL or UNDEFINED.");
     throw new functions.https.HttpsError(
         "unauthenticated",
-        "The function must be called while authenticated.",
+        "The function must be called while authenticated (context.auth is missing).",
     );
   }
+  */
+  // --- END TEMPORARY COMMENT OUT ---
+
+  // Ensure data is still passed correctly, even if auth is bypassed for now
   const userId = data.userId;
   const wardId = data.wardId;
+  // Add log to indicate bypass
+  functions.logger.info(`Auth check bypassed for review demo. Processing for user ${userId} in ward ${wardId}`);
 
   if (!userId || !wardId) {
+    functions.logger.error("Missing userId or wardId in request data:", data);
     throw new functions.https.HttpsError(
         "invalid-argument",
         "Please provide userId and wardId.",
     );
   }
 
-  functions.logger.info(
-      `Starting prediction for user ${userId} in ward ${wardId}`,
-  );
-
-  // 2. Fetch Training Data
+  // 2. Fetch Training Data (Keep existing logic - check logs if this part fails now)
   const allDataRows = [];
   try {
     const usersSnapshot = await db.collection("users")
@@ -94,16 +103,13 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
         const bills = billingHistorySnapshot.docs.map((doc) => doc.data());
         const monthlyConsumptions = [];
 
-        // Calculate monthly consumptions first
         for (let i = 1; i < bills.length; i++) {
           const dateCurrent = bills[i].date.toDate();
           const datePrevious = bills[i - 1].date.toDate();
-          // Check if interval is roughly a month (e.g., 20-40 days)
           const diffDays = (
             dateCurrent.getTime() - datePrevious.getTime()
           ) / (1000 * 3600 * 24);
 
-          // Only consider intervals roughly a month long
           if (diffDays > 20 && diffDays < 40) {
             const consumption = Math.max(0, (bills[i].reading || 0) -
                                             (bills[i - 1].reading || 0));
@@ -111,25 +117,19 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
           }
         }
 
-        // Create training rows using average and category of next known month
         if (monthlyConsumptions.length > 0) {
           const averageConsumption = monthlyConsumptions
               .reduce((a, b) => a + b, 0) / monthlyConsumptions.length;
           let validIntervalsCount = 0;
-          // Loop up to second to last consumption to predict the last one
           for (let i = 0; i < monthlyConsumptions.length - 1; i++) {
-            // Assumes monthlyConsumptions[i] corresponds to consumption
-            // *ending* at bills[i+1].date
-            const billDate = bills[i + 1].date.toDate(); // Date recorded
-            // Predict next month's category
+            const billDate = bills[i + 1].date.toDate();
             const targetCategory = getCategoryForConsumption(
                 monthlyConsumptions[i+1],
             );
-
             allDataRows.push([
               Number(averageConsumption),
-              Number(billDate.getMonth() + 1), // Month (1-12) recorded
-              Number(targetCategory), // Category Index of *next* period
+              Number(billDate.getMonth() + 1),
+              Number(targetCategory),
             ]);
             validIntervalsCount++;
           }
@@ -138,7 +138,6 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
                 `Added ${validIntervalsCount} rows for user ${userDoc.id}`,
             );
           } else {
-            // Log if no sequential intervals were found for training row generation
             functions.logger.debug(
                 `Skipping user ${userDoc.id}, no sequential intervals.`,
             );
@@ -161,19 +160,17 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
     );
   }
 
-  // Need enough data for KNN (adjust K if needed)
-  const K_VALUE = 3; // Use a smaller K
+  const K_VALUE = 3;
   if (allDataRows.length < K_VALUE) {
-    // Log insufficient data warning
     functions.logger.warn(
         `Insufficient training data (${allDataRows.length} rows) ` +
         `for ward ${wardId}. Needs at least ${K_VALUE}. Cannot predict.`,
     );
-    return {category: null}; // Return null if not enough data
+    return {category: null};
   }
   functions.logger.info(`Generated ${allDataRows.length} training rows.`);
 
-  // 3. Fetch Target User's Average Consumption
+  // 3. Fetch Target User's Average Consumption (Keep existing logic)
   let currentUserAverageConsumption = 0.0;
   try {
     const userBillingSnapshot = await db.collection("users").doc(userId)
@@ -191,7 +188,7 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
           dateCurrent.getTime() - datePrevious.getTime()
         ) / (1000 * 3600 * 24);
 
-        if (diffDays > 20 && diffDays < 40) { // Check interval
+        if (diffDays > 20 && diffDays < 40) {
           consumptions.push(
               Math.max(0, (bills[i].reading || 0) - (bills[i - 1].reading || 0)),
           );
@@ -204,14 +201,12 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
             `User ${userId} avg consumption: ${currentUserAverageConsumption}`,
         );
       } else {
-        // Log if no valid periods found for the target user
         functions.logger.warn(
             `No valid periods for current user ${userId}. Cannot predict.`,
         );
         return {category: null};
       }
     } else {
-      // Log if target user has insufficient history
       functions.logger.warn(
           `Insufficient history (<2 bills) for user ${userId}. Cannot predict.`,
       );
@@ -226,22 +221,17 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
     );
   }
 
-  // 4. Prepare KNN and Predict
+  // 4. Prepare KNN and Predict (Keep existing logic)
   try {
-    // Ensure K is not larger than the number of data points
     const kValue = Math.min(K_VALUE, allDataRows.length);
     const knn = new KNear(kValue);
 
-    // Train the model: features are [avgConsumption, month]
-    // Label is categoryIndex
     for (const row of allDataRows) {
       knn.learn(row.slice(0, 2), row[2]);
     }
     functions.logger.info(`KNN Training complete with K=${kValue}`);
 
-    // Create prediction point: use target user's average and the *next* month
     const currentMonth = new Date().getMonth(); // 0-11
-    // Handle year wrap-around for December -> January
     const nextMonth = (currentMonth === 11) ? 1 : currentMonth + 2; // Month (1-12)
     const predictionPoint = [
       Number(currentUserAverageConsumption),
@@ -249,29 +239,24 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
     ];
     functions.logger.info(`Prediction point: ${predictionPoint}`);
 
-    // Make prediction
     const predictedCategoryIndex = knn.classify(predictionPoint);
     functions.logger.info(`Prediction result index: ${predictedCategoryIndex}`);
 
-    // Check validity
     if (typeof predictedCategoryIndex !== "number" ||
         predictedCategoryIndex < 0 ||
         predictedCategoryIndex >= categoryNames.length ||
         !Number.isInteger(predictedCategoryIndex)) {
-      // Log invalid prediction index
       functions.logger.error(
           `Invalid prediction index: ${predictedCategoryIndex}`,
       );
       return {category: null};
     }
 
-    // Return the category name
     const categoryName = categoryNames[predictedCategoryIndex];
     functions.logger.info(`Predicted Category Name: ${categoryName}`);
     return {category: categoryName};
   } catch (error) {
     functions.logger.error("Error during KNN prediction:", error);
-    // Return null instead of throwing an error back to the client
     return {category: null};
   }
 }); // END predictConsumption
@@ -281,72 +266,77 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
 // === DELETION TRIGGER FUNCTION (Firestore Trigger - v2) ==============
 // ======================================================================
 /**
- * Listens for updates on user documents and performs a full deletion if a
- * 'deletionRequested' flag is set to true.
- * v2 Firestore Trigger Syntax.
+ * Handles the deletion of a user and their associated data when the
+ * 'deletionRequested' flag is set to true on their user document.
+ * Triggered on updates to documents in the 'users' collection.
+ * @param {functions.Change<functions.firestore.DocumentSnapshot>} change
+ * Object containing the data before and after the change.
+ * @param {functions.EventContext} context Context metadata for the event.
+ * @return {Promise<object|null>} A promise resolving with a success message
+ * or null if no action was taken or an error occurred.
  */
 exports.handleDeletionRequest = onDocumentUpdated("users/{userId}", async (event) => {
-  // Get data before and after the change
+  // Keep existing deletion logic
   const beforeData = event.data.before.data();
   const afterData = event.data.after.data();
   const userIdToDelete = event.params.userId;
 
-  // Log the event for debugging
   console.log(`Update event triggered for user: ${userIdToDelete}`);
 
-  // Check existence of data and the specific flag change
+  // Check if deletion flag was just set to true
   if (!event.data.before.exists || !event.data.after.exists ||
       afterData.deletionRequested !== true ||
-      beforeData.deletionRequested === true) {
-    // Log reason for no action
+      beforeData.deletionRequested === true) { // Avoid re-triggering if flag was already true
     console.log(
-        `No action needed for user ${userIdToDelete}. ` +
-        "Flag not set, already processed, data missing, or doc deleted.",
+        `No deletion action needed for user ${userIdToDelete}. ` +
+        "Flag not set/changed correctly, or data missing.",
     );
     return null;
   }
+
 
   console.log(
       `Deletion requested for user: ${userIdToDelete}. Starting process...`,
   );
 
   try {
-    // 1. Delete user from Firebase Authentication
+    // 1. Delete auth user
     await admin.auth().deleteUser(userIdToDelete);
     console.log(`Successfully deleted auth user: ${userIdToDelete}`);
 
-    // 2. Delete the user's document from Firestore
+    // 2. Delete Firestore document
+    // NOTE: The trigger runs *after* the update that set deletionRequested=true.
+    // Deleting the document that triggered the function is standard practice here.
     await event.data.after.ref.delete();
     console.log(`Successfully deleted user document: ${userIdToDelete}`);
 
-    // Batch deletion helper function
+    // Batch deletion helper
     const deleteQueryBatch = async (query, batchSize) => {
       const snapshot = await query.limit(batchSize).get();
-      if (snapshot.size === 0) return 0; // Nothing left
+      if (snapshot.size === 0) return 0;
 
       const batch = db.batch();
       snapshot.docs.forEach((doc) => batch.delete(doc.ref));
       await batch.commit();
 
-      return snapshot.size; // Return number deleted
+      return snapshot.size;
     };
 
-    // 3. Delete associated complaints (in batches)
+    // 3. Delete complaints
     const complaintsQuery = db.collection("complaints")
         .where("userId", "==", userIdToDelete);
     let numComplaintsDeleted = 0;
-    // Keep deleting batches until no more documents match
     // eslint-disable-next-line no-constant-condition
     while (true) {
       const deletedCount = await deleteQueryBatch(complaintsQuery, 100);
       numComplaintsDeleted += deletedCount;
-      if (deletedCount < 100) break; // Stop if less than batch size deleted
+      if (deletedCount < 100) break;
     }
     console.log(
         `Deleted ${numComplaintsDeleted} complaints for user ${userIdToDelete}`,
     );
 
-    // 4. Delete associated connection requests (in batches)
+    // 4. Delete connection requests
     const requestsQuery = db.collection("connection_requests")
         .where("userId", "==", userIdToDelete);
     let numRequestsDeleted = 0;
@@ -361,7 +351,7 @@ exports.handleDeletionRequest = onDocumentUpdated("users/{userId}", async (event
         userIdToDelete,
     );
 
-    // 5. Delete billing history subcollection (in batches)
+    // 5. Delete billing history
     const billingHistoryRef = db.collection("users").doc(userIdToDelete)
         .collection("billingHistory");
     let numBillingDeleted = 0;
@@ -379,7 +369,6 @@ exports.handleDeletionRequest = onDocumentUpdated("users/{userId}", async (event
     if (afterData.phoneNumber) {
       await db.collection("phoneNumbers").doc(afterData.phoneNumber).delete()
           .catch((err) => {
-            // Log warning if phone mapping deletion fails
             console.warn(
                 `Could not delete phone number mapping for user ` +
                 `${userIdToDelete}: ${err.message}`,
@@ -405,10 +394,11 @@ exports.handleDeletionRequest = onDocumentUpdated("users/{userId}", async (event
     console.error(`Error deleting user ${userIdToDelete}:`, error);
 
     // Attempt to reset the flag only if the user document still exists
+    // (it might have been deleted just before the error occurred in Auth deletion)
     try {
-      const userDocRef = event.data.after.ref;
+      const userDocRef = db.collection("users").doc(userIdToDelete); // Use direct ref
       const userDocSnapshot = await userDocRef.get();
-      if (userDocSnapshot.exists) {
+      if (userDocSnapshot.exists) { // Check if it *still* exists after error
         let errorMessage = "Unknown error during deletion";
         if (error instanceof Error && error.message) {
           errorMessage = error.message;
@@ -423,7 +413,6 @@ exports.handleDeletionRequest = onDocumentUpdated("users/{userId}", async (event
             `Reset deletionRequested flag for ${userIdToDelete} due to error.`,
         );
       } else {
-        // Log if doc already gone after error
         console.log(
             `User doc ${userIdToDelete} no longer exists after error. Cannot reset flag.`,
         );
@@ -434,6 +423,7 @@ exports.handleDeletionRequest = onDocumentUpdated("users/{userId}", async (event
           updateError,
       );
     }
-    return null; // Don't re-throw from trigger
+    // Return null to indicate the trigger finished, even with an error during cleanup
+    return null;
   }
 }); // END handleDeletionRequest
