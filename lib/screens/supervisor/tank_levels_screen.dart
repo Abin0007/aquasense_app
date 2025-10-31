@@ -74,12 +74,23 @@ class _TankLevelsScreenState extends State<TankLevelsScreen> {
               onPressed: () async {
                 final newLevel = int.tryParse(levelController.text);
                 if (newLevel != null && newLevel >= 0 && newLevel <= 100) {
-                  // Use the tank's ID (which is the ward ID) to update the correct document
-                  await FirebaseFirestore.instance.collection('water_tanks').doc(tank.id).update({
-                    'level': newLevel,
-                    'lastUpdated': Timestamp.now(),
-                  });
-                  if (context.mounted) Navigator.of(dialogContext).pop();
+                  try {
+                    // --- FIX: Use FieldValue.serverTimestamp() to satisfy security rules ---
+                    await FirebaseFirestore.instance.collection('water_tanks').doc(tank.id).update({
+                      'level': newLevel,
+                      'lastUpdated': FieldValue.serverTimestamp(),
+                    });
+                    // --- END FIX ---
+
+                    if (context.mounted) Navigator.of(dialogContext).pop();
+                  } catch (e) {
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(content: Text('Failed to update tank level: ${e.toString()}'), backgroundColor: Colors.red)
+                      );
+                    }
+                  }
+
                 } else {
                   ScaffoldMessenger.of(context).showSnackBar(
                       const SnackBar(content: Text('Please enter a valid number between 0 and 100.'), backgroundColor: Colors.red)

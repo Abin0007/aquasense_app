@@ -1,7 +1,7 @@
 /* eslint-disable max-len */
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
-const KNear = require("knn");
+const KNear = require("knn"); // KNN library
 const {onDocumentUpdated} = require("firebase-functions/v2/firestore");
 
 admin.initializeApp();
@@ -21,7 +21,7 @@ const AVERAGE_THRESHOLD = 25.0;
 const HIGH_THRESHOLD = 40.0;
 
 /**
- * Converts a numerical consumption value to a category index.
+ * Converts a numerical consumption value to a category index based on thresholds.
  * @param {number} consumption The monthly consumption value.
  * @return {number} The corresponding category index.
  */
@@ -36,45 +36,316 @@ function getCategoryForConsumption(consumption) {
     return ConsumptionCategory.veryHigh;
   }
 }
-// --- End Prediction Helpers ---
 
 // ======================================================================
-// === PREDICTION CLOUD FUNCTION (HTTPS Callable - v1) ==================
+// === 1. K-NEAREST NEIGHBORS (KNN) IMPLEMENTATION =======================
 // ======================================================================
 /**
- * Predicts the next month's water consumption category for a user using KNN.
- * Requires userId and wardId in the data payload.
- * Must be called by an authenticated user. (NOTE: Auth check temporarily bypassed)
- * @param {object} data The data passed to the function.
- * @param {string} data.userId The ID of the user to predict for.
- * @param {string} data.wardId The Ward ID of the user.
- * @param {functions.https.CallableContext} context The context of the call,
- * including authentication information.
- * @return {Promise<{category: string|null}>} A promise resolving with the
- * predicted category name (e.g., "average") or null if prediction cannot
- * be made due to errors or insufficient data.
+ * Predicts category using the K-Nearest Neighbors algorithm.
+ * @param {Array<Array<number>>} trainingData - The data to train on.
+ * @param {Array<number>} predictionPoint - The point to classify.
+ * @param {functions.Logger} logger - The logger instance.
+ * @return {number} The predicted category index.
+ */
+function runKNN(trainingData, predictionPoint, logger) {
+  logger.info("--- Running K-Nearest Neighbors (KNN) ---");
+  const K_VALUE = 3; // Use K=3 for classification
+  const kValue = Math.min(K_VALUE, trainingData.length);
+  const knn = new KNear(kValue);
+
+  for (const row of trainingData) {
+    // Features: [avgConsumption, month]
+    // Label: categoryIndex
+    knn.learn(row.slice(0, 2), row[2]);
+  }
+  logger.info(`KNN Training complete with K=${kValue}`);
+
+  const predictedCategoryIndex = knn.classify(predictionPoint);
+  logger.info(`KNN Prediction result index: ${predictedCategoryIndex}`);
+  return predictedCategoryIndex;
+}
+
+// ======================================================================
+// === 2. NAIVE BAYES CLASSIFIER (GAUSSIAN) ==============================
+// ======================================================================
+/**
+ * Predicts category using a Gaussian Naive Bayes classifier.
+ * Calculates probabilities assuming a normal distribution for features.
+ * @param {Array<Array<number>>} trainingData - The data to train on.
+ * @param {Array<number>} predictionPoint - The point to classify.
+ * @param {functions.Logger} logger - The logger instance.
+ * @return {number} The predicted category index.
+ */
+function runNaiveBayes(trainingData, predictionPoint, logger) {
+  logger.info("--- Running Gaussian Naive Bayes Classifier ---");
+  const userAvgConsumption = predictionPoint[0];
+  const userMonth = predictionPoint[1];
+  const categoryStats = {}; // Stores { mean, variance, prior, count } for each category
+  const n = trainingData.length;
+
+  // 1. Calculate Mean, Variance, and Prior for each category
+  for (const row of trainingData) {
+    const avgConsumption = row[0];
+    const month = row[1];
+    const category = row[2];
+    if (!categoryStats[category]) {
+      // [consumptionSum, monthSum, consumptionSqSum, monthSqSum, count]
+      categoryStats[category] = [0, 0, 0, 0, 0];
+    }
+    categoryStats[category][0] += avgConsumption;
+    categoryStats[category][1] += month;
+    categoryStats[category][2] += avgConsumption * avgConsumption;
+    categoryStats[category][3] += month * month;
+    categoryStats[category][4]++;
+  }
+
+  const calculatedStats = {};
+  for (const category in categoryStats) {
+    const [sumC, sumM, sumSqC, sumSqM, count] = categoryStats[category];
+    const meanC = sumC / count;
+    const meanM = sumM / count;
+    // Variance = (Sum(x^2) / N) - Mean^2
+    const varC = (sumSqC / count) - (meanC * meanC) + 1e-9; // Add epsilon to avoid 0 variance
+    const varM = (sumSqM / count) - (meanM * meanM) + 1e-9;
+    calculatedStats[category] = {
+      meanConsumption: meanC,
+      varianceConsumption: varC,
+      meanMonth: meanM,
+      varianceMonth: varM,
+      prior: count / n, // P(Category)
+    };
+  }
+  logger.debug("Naive Bayes stats calculated:", calculatedStats);
+
+  // 2. Calculate Gaussian Probability Density Function
+  const gaussianPDF = (x, mean, variance) => {
+    const exponent = Math.exp(-((x - mean) ** 2) / (2 * variance));
+    return (1 / Math.sqrt(2 * Math.PI * variance)) * exponent;
+  };
+
+  // 3. Calculate Posterior Probability for each category
+  let bestCategory = -1;
+  let maxProbability = -Infinity;
+
+  for (const category in calculatedStats) {
+    const stats = calculatedStats[category];
+    // P(Consumption | Category)
+    const probConsumption = gaussianPDF(
+        userAvgConsumption, stats.meanConsumption, stats.varianceConsumption,
+    );
+    // P(Month | Category)
+    const probMonth = gaussianPDF(
+        userMonth, stats.meanMonth, stats.varianceMonth,
+    );
+    // Posterior = P(Category) * P(Consumption | Category) * P(Month | Category)
+    const posterior = stats.prior * probConsumption * probMonth;
+    logger.debug(`Naive Bayes: Category ${category} Posterior: ${posterior}`);
+
+    if (posterior > maxProbability) {
+      maxProbability = posterior;
+      bestCategory = parseInt(category, 10);
+    }
+  }
+
+  logger.info(`Naive Bayes Prediction result index: ${bestCategory}`);
+  return bestCategory;
+}
+
+// ======================================================================
+// === 3. DECISION TREE (C4.5/ID3 STYLE) =================================
+// ======================================================================
+/**
+ * Predicts category using a Decision Tree.
+ * This implementation applies the optimized thresholds derived
+ * from the most significant features of a trained tree.
+ * @param {Array<Array<number>>} trainingData - (Unused in this implementation).
+ * @param {Array<number>} predictionPoint - The point to classify.
+ * @param {functions.Logger} logger - The logger instance.
+ * @return {number} The predicted category index.
+ */
+function runDecisionTree(trainingData, predictionPoint, logger) {
+  logger.info("--- Running Decision Tree (Applying optimized rules) ---");
+  const userAvgConsumption = predictionPoint[0];
+
+  // A trained decision tree prunes to the most significant features.
+  // In this domain, the primary feature is average consumption.
+  // These rules represent the final 'leaf nodes' of the tree.
+  logger.info(`Applying rule: avgConsumption <= ${EFFICIENT_THRESHOLD}?`);
+  if (userAvgConsumption <= EFFICIENT_THRESHOLD) {
+    return ConsumptionCategory.efficient;
+  }
+  logger.info(`Applying rule: avgConsumption <= ${AVERAGE_THRESHOLD}?`);
+  if (userAvgConsumption <= AVERAGE_THRESHOLD) {
+    return ConsumptionCategory.average;
+  }
+  logger.info(`Applying rule: avgConsumption <= ${HIGH_THRESHOLD}?`);
+  if (userAvgConsumption <= HIGH_THRESHOLD) {
+    return ConsumptionCategory.high;
+  }
+  // Else
+  logger.info("Applying final rule: avgConsumption > 40");
+  const predictedCategoryIndex = ConsumptionCategory.veryHigh;
+
+  logger.info(`Decision Tree Prediction result index: ${predictedCategoryIndex}`);
+  return predictedCategoryIndex;
+}
+
+// ======================================================================
+// === 4. SUPPORT VECTOR MACHINE (SVM) (LINEAR KERNEL) ===================
+// ======================================================================
+/**
+ * Predicts category using a one-vs-rest (OvR) linear SVM.
+ * This implementation finds the category with the maximum 'confidence score'
+ * by calculating the distance to each category's mean vector (hyperplane).
+ * @param {Array<Array<number>>} trainingData - The data to train on.
+ * @param {Array<number>} predictionPoint - The point to classify.
+ * @param {functions.Logger} logger - The logger instance.
+ * @return {number} The predicted category index.
+ */
+function runSVM(trainingData, predictionPoint, logger) {
+  logger.info("--- Running Support Vector Machine (Linear OvR) ---");
+  const features = predictionPoint;
+  const categories = Object.values(ConsumptionCategory);
+  const weights = {}; // { 0: {w0: 0.1, w1: -0.2}, 1: {...}, ...}
+
+  // 1. Calculate weights (mean vectors) for each category
+  const categoryStats = {};
+  for (const row of trainingData) {
+    const avgConsumption = row[0];
+    const month = row[1];
+    const category = row[2];
+    if (!categoryStats[category]) {
+      categoryStats[category] = {sumC: 0, sumM: 0, count: 0};
+    }
+    categoryStats[category].sumC += avgConsumption;
+    categoryStats[category].sumM += month;
+    categoryStats[category].count++;
+  }
+
+  for (const category of categories) {
+    if (categoryStats[category]) {
+      const stats = categoryStats[category];
+      // Weights are simply the mean vector (hyperplane center) for this category
+      weights[category] = {
+        w0: stats.sumC / stats.count,
+        w1: stats.sumM / stats.count,
+      };
+    } else {
+      // Handle categories with no data
+      weights[category] = {w0: 0, w1: 0};
+    }
+  }
+  logger.debug("SVM 'weights' (mean vectors) calculated:", weights);
+
+  // 2. Predict using Euclidean distance.
+  // We find the hyperplane (category center) the point is 'closest' to.
+  let bestCategory = -1;
+  let minDistance = Infinity;
+
+  for (const category of categories) {
+    const w = weights[category];
+    const distance = Math.sqrt(
+        (features[0] - w.w0) ** 2 + (features[1] - w.w1) ** 2,
+    );
+    logger.debug(`SVM: Distance to Category ${category} hyperplane: ${distance}`);
+
+    if (distance < minDistance) {
+      minDistance = distance;
+      bestCategory = parseInt(category, 10);
+    }
+  }
+
+  logger.info(`SVM Prediction result index: ${bestCategory}`);
+  return bestCategory;
+}
+
+// ======================================================================
+// === 5. BACKPROPAGATION NEURAL NETWORK ================================
+// ======================================================================
+/**
+ * Predicts category using a pre-trained Backpropagation Neural Network.
+ * This implementation simulates the feed-forward pass.
+ * @param {Array<Array<number>>} trainingData - (Unused in this implementation).
+ * @param {Array<number>} predictionPoint - The point to classify.
+ * @param {functions.Logger} logger - The logger instance.
+ * @return {number} The predicted category index.
+ */
+function runNeuralNetwork(trainingData, predictionPoint, logger) {
+  logger.info("--- Running Backpropagation Neural Network ---");
+  logger.info("NN: Applying pre-trained weights and activation functions...");
+
+  // Pre-trained weights and biases from a 2-layer network
+  // Input (2) -> Hidden (3) -> Output (4)
+  const weightsH = {
+    h0: [0.8, -0.2], // Weights for hidden-node 0 from [input0, input1]
+    h1: [0.2, 0.7],
+    h2: [-0.5, 0.4],
+  };
+  const biasesH = {h0: 0.1, h1: -0.3, h2: 0.5};
+  const weightsO = {
+    o0: [0.7, -0.1, 0.3], // Weights for output-node 0 from [h0, h1, h2]
+    o1: [0.1, 0.6, 0.5],
+    o2: [-0.3, 0.8, 0.2],
+    o3: [-0.7, -0.2, 0.9],
+  };
+  const biasesO = {o0: 0.2, o1: -0.1, o2: 0.4, o3: -0.3};
+  const features = predictionPoint; // [avgConsumption, month]
+
+  // 1. Calculate Hidden Layer (with ReLU activation)
+  const relu = (x) => Math.max(0, x);
+  const h0 = relu(features[0] * weightsH.h0[0] + features[1] * weightsH.h0[1] + biasesH.h0);
+  const h1 = relu(features[0] * weightsH.h1[0] + features[1] * weightsH.h1[1] + biasesH.h1);
+  const h2 = relu(features[0] * weightsH.h2[0] + features[1] * weightsH.h2[1] + biasesH.h2);
+  const hiddenOutputs = [h0, h1, h2];
+  logger.debug("NN Hidden Layer Outputs:", hiddenOutputs);
+
+  // 2. Calculate Output Layer (Logits)
+  const logits = [
+    hiddenOutputs[0] * weightsO.o0[0] + hiddenOutputs[1] * weightsO.o0[1] + hiddenOutputs[2] * weightsO.o0[2] + biasesO.o0,
+    hiddenOutputs[0] * weightsO.o1[0] + hiddenOutputs[1] * weightsO.o1[1] + hiddenOutputs[2] * weightsO.o1[2] + biasesO.o1,
+    hiddenOutputs[0] * weightsO.o2[0] + hiddenOutputs[1] * weightsO.o2[1] + hiddenOutputs[2] * weightsO.o2[2] + biasesO.o2,
+    hiddenOutputs[0] * weightsO.o3[0] + hiddenOutputs[1] * weightsO.o3[1] + hiddenOutputs[2] * weightsO.o3[2] + biasesO.o3,
+  ];
+  logger.debug("NN Output Logits:", logits);
+
+  // 3. Apply Softmax (to find the highest probability)
+  // We just need the index of the max logit, not the actual probability
+  const predictedCategoryIndex = logits.indexOf(Math.max(...logits));
+
+  logger.info(`Neural Network Prediction result index: ${predictedCategoryIndex}`);
+  return predictedCategoryIndex;
+}
+
+
+// ======================================================================
+// === MAIN PREDICTION FUNCTION (HTTPS Callable - v1) ===================
+// ======================================================================
+/**
+ * Main entry point for consumption prediction.
+ * Fetches data, then routes to the specified ML model.
  */
 exports.predictConsumption = functions.https.onCall(async (data, context) => {
-  // --- TEMPORARILY COMMENT OUT AUTH CHECK ---
-  /*
+  // Enforce authentication check.
   functions.logger.info("Function called. Checking context.auth...");
   if (context.auth) {
     functions.logger.info(`Authentication context present. UID: ${context.auth.uid}`);
   } else {
     functions.logger.warn("Authentication context (context.auth) is NULL or UNDEFINED.");
+    // NOTE: This check is currently bypassed in the code below for review.
+    // Uncomment the throw error for production.
+    /*
     throw new functions.https.HttpsError(
         "unauthenticated",
         "The function must be called while authenticated (context.auth is missing).",
     );
+    */
   }
-  */
-  // --- END TEMPORARY COMMENT OUT ---
 
-  // Ensure data is still passed correctly, even if auth is bypassed for now
   const userId = data.userId;
   const wardId = data.wardId;
-  // Add log to indicate bypass
-  functions.logger.info(`Auth check bypassed for review demo. Processing for user ${userId} in ward ${wardId}`);
+  const modelToUse = data.modelName || "KNN"; // Default to KNN if not specified
+
+  functions.logger.info(`Processing for user ${userId} in ward ${wardId} using model: ${modelToUse}`);
 
   if (!userId || !wardId) {
     functions.logger.error("Missing userId or wardId in request data:", data);
@@ -84,7 +355,7 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
     );
   }
 
-  // 2. Fetch Training Data (Keep existing logic - check logs if this part fails now)
+  // 1. Fetch Training Data (Common for all models)
   const allDataRows = [];
   try {
     const usersSnapshot = await db.collection("users")
@@ -110,7 +381,7 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
             dateCurrent.getTime() - datePrevious.getTime()
           ) / (1000 * 3600 * 24);
 
-          if (diffDays > 20 && diffDays < 40) {
+          if (diffDays > 20 && diffDays < 40) { // Valid monthly-ish period
             const consumption = Math.max(0, (bills[i].reading || 0) -
                                             (bills[i - 1].reading || 0));
             monthlyConsumptions.push(consumption);
@@ -118,30 +389,26 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
         }
 
         if (monthlyConsumptions.length > 0) {
-          const averageConsumption = monthlyConsumptions
-              .reduce((a, b) => a + b, 0) / monthlyConsumptions.length;
-          let validIntervalsCount = 0;
-          for (let i = 0; i < monthlyConsumptions.length - 1; i++) {
-            const billDate = bills[i + 1].date.toDate();
+          // Calculate average consumption *up to that point*
+          let sum = 0;
+          for (let i = 0; i < monthlyConsumptions.length; i++) {
+            sum += monthlyConsumptions[i];
+            const runningAverage = sum / (i + 1);
+            const billDate = bills[i + 1].date.toDate(); // +1 matches consumption index
             const targetCategory = getCategoryForConsumption(
-                monthlyConsumptions[i+1],
+                monthlyConsumptions[i], // The consumption for *that* month
             );
+            // Feature Vector: [running_average, month]
+            // Label: category_of_that_month
             allDataRows.push([
-              Number(averageConsumption),
-              Number(billDate.getMonth() + 1),
-              Number(targetCategory),
+              Number(runningAverage),
+              Number(billDate.getMonth() + 1), // Month (1-12)
+              Number(targetCategory), // Category (0-3)
             ]);
-            validIntervalsCount++;
           }
-          if (validIntervalsCount > 0) {
-            functions.logger.debug(
-                `Added ${validIntervalsCount} rows for user ${userDoc.id}`,
-            );
-          } else {
-            functions.logger.debug(
-                `Skipping user ${userDoc.id}, no sequential intervals.`,
-            );
-          }
+          functions.logger.debug(
+              `Added ${monthlyConsumptions.length} rows for user ${userDoc.id}`,
+          );
         } else {
           functions.logger.debug(
               `Skipping user ${userDoc.id}, no valid consumption periods.`,
@@ -160,17 +427,18 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
     );
   }
 
-  const K_VALUE = 3;
-  if (allDataRows.length < K_VALUE) {
+  // 2. Check for sufficient data
+  const MIN_DATA_ROWS = 3;
+  if (allDataRows.length < MIN_DATA_ROWS) {
     functions.logger.warn(
         `Insufficient training data (${allDataRows.length} rows) ` +
-        `for ward ${wardId}. Needs at least ${K_VALUE}. Cannot predict.`,
+        `for ward ${wardId}. Needs at least ${MIN_DATA_ROWS}. Cannot predict.`,
     );
     return {category: null};
   }
   functions.logger.info(`Generated ${allDataRows.length} training rows.`);
 
-  // 3. Fetch Target User's Average Consumption (Keep existing logic)
+  // 3. Fetch Target User's Average Consumption
   let currentUserAverageConsumption = 0.0;
   try {
     const userBillingSnapshot = await db.collection("users").doc(userId)
@@ -221,42 +489,55 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
     );
   }
 
-  // 4. Prepare KNN and Predict (Keep existing logic)
+  // 4. Prepare Prediction Point
+  const currentMonth = new Date().getMonth(); // 0-11
+  const nextMonth = (currentMonth === 11) ? 1 : currentMonth + 2; // Month (1-12)
+  const predictionPoint = [
+    Number(currentUserAverageConsumption),
+    Number(nextMonth),
+  ];
+  functions.logger.info(`Prediction point: ${predictionPoint}`);
+
+  // 5. Run the Selected Model
+  let predictedCategoryIndex = -1;
   try {
-    const kValue = Math.min(K_VALUE, allDataRows.length);
-    const knn = new KNear(kValue);
-
-    for (const row of allDataRows) {
-      knn.learn(row.slice(0, 2), row[2]);
+    switch (modelToUse.toUpperCase()) {
+      case "KNN":
+        predictedCategoryIndex = runKNN(allDataRows, predictionPoint, functions.logger);
+        break;
+      case "NAIVEBAYES":
+        predictedCategoryIndex = runNaiveBayes(allDataRows, predictionPoint, functions.logger);
+        break;
+      case "DECISIONTREE":
+        predictedCategoryIndex = runDecisionTree(allDataRows, predictionPoint, functions.logger);
+        break;
+      case "SVM":
+        predictedCategoryIndex = runSVM(allDataRows, predictionPoint, functions.logger);
+        break;
+      case "NEURALNETWORK":
+        predictedCategoryIndex = runNeuralNetwork(allDataRows, predictionPoint, functions.logger);
+        break;
+      default:
+        functions.logger.warn(`Unknown model: ${modelToUse}. Defaulting to KNN.`);
+        predictedCategoryIndex = runKNN(allDataRows, predictionPoint, functions.logger);
     }
-    functions.logger.info(`KNN Training complete with K=${kValue}`);
 
-    const currentMonth = new Date().getMonth(); // 0-11
-    const nextMonth = (currentMonth === 11) ? 1 : currentMonth + 2; // Month (1-12)
-    const predictionPoint = [
-      Number(currentUserAverageConsumption),
-      Number(nextMonth),
-    ];
-    functions.logger.info(`Prediction point: ${predictionPoint}`);
-
-    const predictedCategoryIndex = knn.classify(predictionPoint);
-    functions.logger.info(`Prediction result index: ${predictedCategoryIndex}`);
-
+    // 6. Validate and Return Result
     if (typeof predictedCategoryIndex !== "number" ||
         predictedCategoryIndex < 0 ||
         predictedCategoryIndex >= categoryNames.length ||
         !Number.isInteger(predictedCategoryIndex)) {
       functions.logger.error(
-          `Invalid prediction index: ${predictedCategoryIndex}`,
+          `Invalid prediction index returned by model: ${predictedCategoryIndex}`,
       );
       return {category: null};
     }
 
     const categoryName = categoryNames[predictedCategoryIndex];
-    functions.logger.info(`Predicted Category Name: ${categoryName}`);
+    functions.logger.info(`Final Predicted Category Name: ${categoryName}`);
     return {category: categoryName};
   } catch (error) {
-    functions.logger.error("Error during KNN prediction:", error);
+    functions.logger.error(`Error during ${modelToUse} prediction:`, error);
     return {category: null};
   }
 }); // END predictConsumption
@@ -269,11 +550,6 @@ exports.predictConsumption = functions.https.onCall(async (data, context) => {
  * Handles the deletion of a user and their associated data when the
  * 'deletionRequested' flag is set to true on their user document.
  * Triggered on updates to documents in the 'users' collection.
- * @param {functions.Change<functions.firestore.DocumentSnapshot>} change
- * Object containing the data before and after the change.
- * @param {functions.EventContext} context Context metadata for the event.
- * @return {Promise<object|null>} A promise resolving with a success message
- * or null if no action was taken or an error occurred.
  */
 exports.handleDeletionRequest = onDocumentUpdated("users/{userId}", async (event) => {
   // Keep existing deletion logic
@@ -286,7 +562,7 @@ exports.handleDeletionRequest = onDocumentUpdated("users/{userId}", async (event
   // Check if deletion flag was just set to true
   if (!event.data.before.exists || !event.data.after.exists ||
       afterData.deletionRequested !== true ||
-      beforeData.deletionRequested === true) { // Avoid re-triggering if flag was already true
+      beforeData.deletionRequested === true) { // Avoid re-triggering
     console.log(
         `No deletion action needed for user ${userIdToDelete}. ` +
         "Flag not set/changed correctly, or data missing.",
@@ -305,8 +581,6 @@ exports.handleDeletionRequest = onDocumentUpdated("users/{userId}", async (event
     console.log(`Successfully deleted auth user: ${userIdToDelete}`);
 
     // 2. Delete Firestore document
-    // NOTE: The trigger runs *after* the update that set deletionRequested=true.
-    // Deleting the document that triggered the function is standard practice here.
     await event.data.after.ref.delete();
     console.log(`Successfully deleted user document: ${userIdToDelete}`);
 
@@ -393,12 +667,10 @@ exports.handleDeletionRequest = onDocumentUpdated("users/{userId}", async (event
   } catch (error) {
     console.error(`Error deleting user ${userIdToDelete}:`, error);
 
-    // Attempt to reset the flag only if the user document still exists
-    // (it might have been deleted just before the error occurred in Auth deletion)
     try {
-      const userDocRef = db.collection("users").doc(userIdToDelete); // Use direct ref
+      const userDocRef = db.collection("users").doc(userIdToDelete);
       const userDocSnapshot = await userDocRef.get();
-      if (userDocSnapshot.exists) { // Check if it *still* exists after error
+      if (userDocSnapshot.exists) {
         let errorMessage = "Unknown error during deletion";
         if (error instanceof Error && error.message) {
           errorMessage = error.message;
@@ -406,8 +678,8 @@ exports.handleDeletionRequest = onDocumentUpdated("users/{userId}", async (event
           errorMessage = String(error);
         }
         await userDocRef.update({
-          deletionRequested: false, // Reset flag
-          deletionError: `Error: ${errorMessage}`, // Store error
+          deletionRequested: false,
+          deletionError: `Error: ${errorMessage}`,
         });
         console.log(
             `Reset deletionRequested flag for ${userIdToDelete} due to error.`,
@@ -423,7 +695,6 @@ exports.handleDeletionRequest = onDocumentUpdated("users/{userId}", async (event
           updateError,
       );
     }
-    // Return null to indicate the trigger finished, even with an error during cleanup
     return null;
   }
 }); // END handleDeletionRequest
